@@ -107,3 +107,18 @@ func TestThinkingAnimationAndFailure(t *testing.T) {
 		t.Fatal("failure explanation disappeared")
 	}
 }
+
+func TestRemovedSelectionClearsOldOutput(t *testing.T) {
+	m := newModel(Config{}, true)
+	m.runs = []Run{{ID: "A"}, {ID: "B"}, {ID: "C"}}
+	m.runIndex = 1
+	m.logs.SetContent("B's output")
+	updated, cmd := m.Update(runsMsg{runs: []Run{{ID: "A"}, {ID: "C"}}, id: "B", log: "B's output"})
+	m = updated.(model)
+	if r, _ := m.selectedRun(); r.ID != "A" {
+		t.Fatalf("selection=%s", r.ID)
+	}
+	if cmd == nil || strings.Contains(m.logs.View(), "B's output") {
+		t.Fatal("stale output retained or refresh missing")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -12,10 +13,10 @@ import (
 )
 
 func TestWorkerAbortDuringIteration(t *testing.T) {
-	r := fixtureRun(t, `touch ../agent-started
+	r := fixtureRun(t, `touch "__RUN_DIR__/agent-started"
 sleep 30 &
 wait
-touch ../should-not-finish`, 3)
+touch "__RUN_DIR__/should-not-finish"`, 3)
 	done := make(chan error, 1)
 	go func() { done <- worker(r.Dir) }()
 	deadline := time.After(10 * time.Second)
@@ -92,7 +93,7 @@ func TestRedactionAcrossWrites(t *testing.T) {
 }
 
 func TestPrunePreservesWork(t *testing.T) {
-	for _, kind := range []string{"clean", "dirty", "ignored", "unmerged", "active", "recent", "locked"} {
+	for _, kind := range []string{"clean", "interrupted", "stale", "dirty", "ignored", "unmerged", "active", "recent", "locked"} {
 		t.Run(kind, func(t *testing.T) {
 			r := fixtureRun(t, "echo done", 1)
 			// Match the production branch naming invariant.
@@ -114,8 +115,13 @@ func TestPrunePreservesWork(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+			case "interrupted":
+				r.Status = "interrupted"
+			case "stale":
+				r.Status = "running"
 			case "active":
 				r.Status = "running"
+				r.Updated = time.Now()
 			case "recent":
 				r.Updated = time.Now()
 			case "locked":
@@ -130,7 +136,7 @@ func TestPrunePreservesWork(t *testing.T) {
 			}
 			_ = writeJSON(filepath.Join(r.Dir, "run.json"), r)
 			err := pruneRun(r.Dir, time.Now().Add(-30*24*time.Hour))
-			if kind == "clean" {
+			if kind == "clean" || kind == "interrupted" || kind == "stale" {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -152,5 +158,95 @@ func TestPrunePreservesWork(t *testing.T) {
 func TestModelCannotBeAFlag(t *testing.T) {
 	if (RunOptions{Max: 1, Timeout: 1, Model: "--help"}).validate() == nil {
 		t.Fatal("model flag accepted")
+	}
+}
+
+func TestStopRequestStaysLatched(t *testing.T) {
+	r := fixtureRun(t, `touch "__RUN_DIR__/agent-started"
+while [ ! -f "__RUN_DIR__/release" ]; do sleep 0.1; done`, 3)
+	done := make(chan error, 1)
+	go func() { done <- worker(r.Dir) }()
+	wait := func(ready func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !ready() {
+			if time.Now().After(deadline) {
+				_ = requestAbort(r)
+				t.Fatal("worker did not acknowledge request")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	wait(func() bool { _, err := os.Stat(filepath.Join(r.Dir, "agent-started")); return err == nil })
+	if err := requestStop(r); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool {
+		var got Run
+		return readJSON(filepath.Join(r.Dir, "run.json"), &got) == nil && got.StopRequested
+	})
+	if err := os.Remove(filepath.Join(r.Dir, "STOP")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.Dir, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("latched stop lost")
+	}
+	var got Run
+	_ = readJSON(filepath.Join(r.Dir, "run.json"), &got)
+	if got.Status != "stopped" || got.Iteration != 1 || !got.StopRequested {
+		t.Fatalf("state=%+v", got)
+	}
+}
+
+func TestWorkerShutdownGrace(t *testing.T) {
+	if dir := os.Getenv("RALPH_TEST_WORKER_DIR"); dir != "" {
+		if err := worker(dir); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	r := fixtureRun(t, `trap 'printf flushed > .ralph-ledger.md; exit 0' TERM
+touch "__RUN_DIR__/agent-started"
+while :; do sleep 1; done`, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkerShutdownGrace$")
+	cmd.Env = append(os.Environ(), "RALPH_TEST_WORKER_DIR="+r.Dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	for {
+		if _, err := os.Stat(filepath.Join(r.Dir, "agent-started")); err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			_ = cmd.Wait()
+			t.Fatal("worker did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(r.Worktree, ".ralph-ledger.md"))
+	if err != nil || string(b) != "flushed" {
+		t.Fatalf("agent could not flush: %q %v", b, err)
+	}
+	var got Run
+	_ = readJSON(filepath.Join(r.Dir, "run.json"), &got)
+	if got.Status != "stopped" {
+		t.Fatalf("state=%s", got.Status)
 	}
 }

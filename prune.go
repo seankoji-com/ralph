@@ -50,14 +50,22 @@ func pruneRun(dir string, before time.Time) error {
 		return err
 	}
 	switch r.Status {
-	case "complete", "failed", "stopped", "aborted", "budget reached":
+	case "complete", "failed", "stopped", "aborted", "budget reached", "interrupted":
 	default:
-		return fmt.Errorf("run is not finished")
+		// The lock is held: a stale active record has no surviving worker.
+		if !r.active() || time.Since(r.Updated) < 20*time.Second {
+			return fmt.Errorf("run is not finished")
+		}
+		r.Status = "interrupted"
+		if err = writeJSON(filepath.Join(dir, "run.json"), r); err != nil {
+			return err
+		}
 	}
 	if r.Updated.IsZero() || !r.Updated.Before(before) {
 		return fmt.Errorf("run is recent")
 	}
-	if r.ID != filepath.Base(dir) || r.Branch != "codex/ralph-"+r.ID || r.Worktree != filepath.Join(dir, "worktree") {
+	expected := filepath.Join(filepath.Dir(filepath.Dir(dir)), "worktrees", r.ID)
+	if r.ID != filepath.Base(dir) || r.Branch != "codex/ralph-"+r.ID || (r.Worktree != expected && r.Worktree != filepath.Join(dir, "worktree")) {
 		return fmt.Errorf("unexpected run paths")
 	}
 	// Refuse symlink run entries and worktrees. The configured state root may
@@ -93,4 +101,31 @@ func pruneRun(dir string, before time.Time) error {
 		return err
 	}
 	return os.RemoveAll(dir)
+}
+
+// Only the lock can distinguish a dead worker from one delayed by filesystem
+// trouble. Keep Updated intact so recovery does not reset the retention age.
+func recoverInterrupted(r Run) Run {
+	lock, err := os.OpenFile(filepath.Join(r.Dir, "worker.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return r
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return r
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	var current Run
+	if readJSON(filepath.Join(r.Dir, "run.json"), &current) != nil {
+		return r
+	}
+	current.Dir = r.Dir
+	if current.active() && time.Since(current.Updated) > 20*time.Second {
+		current.Status = "interrupted"
+		current.Error = "Worker heartbeat lost. Worktree and logs are preserved."
+		if writeJSON(filepath.Join(r.Dir, "run.json"), current) != nil {
+			return r
+		}
+	}
+	return current
 }

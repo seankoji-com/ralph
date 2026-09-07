@@ -28,7 +28,7 @@ func (m model) commandItems() []stationCommand {
 	if !m.busy && !m.help {
 		items = append(items, stationCommand{"tab0", "Go to loops", "1"}, stationCommand{"tab1", "Choose a repository", "2"}, stationCommand{"tab2", "Open prompt workshop", "3"})
 	}
-	labels := map[string]string{"enter": "Open selected repository", "ctrl+d": "Draft a prompt with Ralph", "ctrl+p": "Review your prompt", "ctrl+l": "Launch this loop", "ctrl+o": "Change loop settings", "n": "Start a new loop", "tab": "Switch output / run details", "f": "Follow live output", "s": "Stop after this iteration", "x": "Stop current agent now", "?": "Show keyboard help", "c": "Clone selected repository", "r": "Refresh organisation repositories", "/": "Find a repository", "esc": "Go back"}
+	labels := map[string]string{"enter": "Open selected repository", "ctrl+d": "Draft a prompt with Ralph", "ctrl+p": "Review your prompt", "ctrl+l": "Launch this loop", "ctrl+o": "Change loop settings", "n": "Start a new loop", "tab": "Switch output / run details", "f": "Follow live output", "s": "Stop after this iteration", "x": "Stop current agent now", "d": "Remove selected run if clean and merged", "?": "Show keyboard help", "c": "Clone selected repository", "r": "Refresh organisation repositories", "/": "Find a repository", "esc": "Go back"}
 	if m.page == workshop {
 		labels["enter"] = "Send message to Ralph"
 	}

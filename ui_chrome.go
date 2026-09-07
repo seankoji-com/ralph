@@ -92,6 +92,9 @@ func (m model) actions() []stationAction {
 	case repositories:
 		return []stationAction{{"enter", "Enter  Open", pink}, {"/", "/  Find", violet}, {"c", "C  Clone", mint}, {"r", "R  Refresh", cyan}, {"esc", "Esc  Loops", violet}}
 	default:
+		if r, ok := m.selectedRun(); ok && !r.active() && !r.External {
+			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"f", "F  Follow", mint}, {"d", "D  Remove clean run", amber}, {"?", "?  Help", cyan}}
+		}
 		return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"f", "F  Follow", mint}, {"s", "S  Stop later", amber}, {"x", "X  Stop now", red}, {"?", "?  Help", cyan}}
 	}
 }
@@ -136,7 +139,7 @@ func (m model) layout() stationLayout {
 	if m.settings != nil {
 		body = chip("TUNE YOUR LOOP", pink) + "\n" + dim.Render("A little ambition. A sensible stopping point.") + "\n\n" + panel.Width(m.width-6).Render(m.settings.View())
 	} else if m.help {
-		body = panel.Width(m.width - 6).Height(m.height - 10).Render(chip("MAKE YOURSELF AT HOME", pink) + "\n\nClick tabs, actions and list rows. Scroll with your mouse or trackpad.\nDrag in the prompt to select text.\n\nctrl+k       Search commands\n1 / 2 / 3    Loops / repositories / workshop\nn            Start with a repository\n/            Filter repositories; enter exits search\nc            Clone selected remote repository\n↑ / ↓        Select a repository or run\ntab          Switch output / run details\nctrl+b / f   Scroll output or conversation back / forward\nf            Follow live output\ns            Stop after the current iteration\nx            Stop now (kills the current agent)\n\nWorkshop     enter send · shift+enter newline · ctrl+d draft\nLaunch       ctrl+o settings · ctrl+l launch · esc back\n\nq / ctrl+c   Leave the station. Detached loops keep running.")
+		body = panel.Width(m.width - 6).Height(m.height - 10).Render(chip("MAKE YOURSELF AT HOME", pink) + "\n\nClick tabs, actions and list rows. Scroll with your mouse or trackpad.\nDrag in the prompt to select text.\n\nctrl+k       Search commands\n1 / 2 / 3    Loops / repositories / workshop\nn            Start with a repository\n/            Filter repositories; enter exits search\nc            Clone selected remote repository\n↑ / ↓        Select a repository or run\ntab          Switch output / run details\nctrl+b / f   Scroll output or conversation back / forward\nf            Follow live output\ns            Stop after the current iteration\nx            Stop now (kills the current agent)\nd            Remove finished run only if clean and merged\n\nWorkshop     enter send · shift+enter newline · ctrl+d draft\nLaunch       ctrl+o settings · ctrl+l launch · esc back\n\nq / ctrl+c   Leave the station. Detached loops keep running.")
 	} else {
 		switch m.page {
 		case board:

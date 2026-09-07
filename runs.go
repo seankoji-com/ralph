@@ -13,30 +13,34 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 type Run struct {
-	ID        string    `json:"id"`
-	Repo      Repo      `json:"repo"`
-	Prompt    string    `json:"prompt"`
-	Model     string    `json:"model"`
-	Runner    string    `json:"runner"`
-	Status    string    `json:"status"`
-	Iteration int       `json:"iteration"`
-	Max       int       `json:"max"`
-	Cooldown  int       `json:"cooldown_seconds"`
-	Timeout   int       `json:"timeout_minutes"`
-	Started   time.Time `json:"started"`
-	Updated   time.Time `json:"updated"`
-	PID       int       `json:"pid"`
-	Worktree  string    `json:"worktree"`
-	Branch    string    `json:"branch"`
-	Error     string    `json:"error,omitempty"`
-	Dir       string    `json:"-"`
-	External  bool      `json:"-"`
-	LogPath   string    `json:"-"`
+	ID             string    `json:"id"`
+	Repo           Repo      `json:"repo"`
+	Prompt         string    `json:"prompt"`
+	Model          string    `json:"model"`
+	Runner         string    `json:"runner"`
+	Status         string    `json:"status"`
+	Iteration      int       `json:"iteration"`
+	Max            int       `json:"max"`
+	Cooldown       int       `json:"cooldown_seconds"`
+	Timeout        int       `json:"timeout_minutes"`
+	Started        time.Time `json:"started"`
+	Updated        time.Time `json:"updated"`
+	PID            int       `json:"pid"`
+	Worktree       string    `json:"worktree"`
+	Branch         string    `json:"branch"`
+	Error          string    `json:"error,omitempty"`
+	StopRequested  bool      `json:"stop_requested,omitempty"`
+	AbortRequested bool      `json:"abort_requested,omitempty"`
+	Dir            string    `json:"-"`
+	External       bool      `json:"-"`
+	LogPath        string    `json:"-"`
 }
 
 func (r Run) active() bool {
@@ -73,7 +77,7 @@ func launchRun(c Config, repo Repo, prompt string, options RunOptions) (Run, err
 	}
 	id := time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(random[:])
 	dir := filepath.Join(c.StateDir, "runs", id)
-	r := Run{ID: id, Repo: repo, Prompt: prompt, Model: options.Model, Runner: runner, Status: "queued", Max: options.Max, Cooldown: options.Cooldown, Timeout: options.Timeout, Started: time.Now(), Updated: time.Now(), Dir: dir, Branch: "codex/ralph-" + id, Worktree: filepath.Join(dir, "worktree")}
+	r := Run{ID: id, Repo: repo, Prompt: prompt, Model: options.Model, Runner: runner, Status: "queued", Max: options.Max, Cooldown: options.Cooldown, Timeout: options.Timeout, Started: time.Now(), Updated: time.Now(), Dir: dir, Branch: "codex/ralph-" + id, Worktree: filepath.Join(c.StateDir, "worktrees", id)}
 	if err := writeJSON(filepath.Join(dir, "run.json"), r); err != nil {
 		return r, err
 	}
@@ -139,11 +143,10 @@ func loadRuns(c Config, repos []Repo) []Run {
 				last = info.ModTime()
 			}
 			if time.Since(last) > 20*time.Second {
-				r.Status = "interrupted"
-				r.Error = "Worker heartbeat lost. Worktree and logs are preserved."
-			} else if _, err := os.Stat(filepath.Join(dir, "ABORT")); err == nil {
+				r = recoverInterrupted(r)
+			} else if _, err := os.Stat(filepath.Join(dir, "ABORT")); err == nil || r.AbortRequested {
 				r.Status = "aborting"
-			} else if _, err := os.Stat(filepath.Join(dir, "STOP")); err == nil {
+			} else if _, err := os.Stat(filepath.Join(dir, "STOP")); err == nil || r.StopRequested {
 				r.Status = "stopping"
 			}
 		}
@@ -231,9 +234,38 @@ func worker(dir string) (result error) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	aborted := func() bool { _, err := os.Stat(filepath.Join(dir, "ABORT")); return err == nil }
+	var stopRequested, abortRequested atomic.Bool
+	stopRequested.Store(r.StopRequested)
+	abortRequested.Store(r.AbortRequested)
+	var stateMu sync.Mutex
+	r.PID = os.Getpid()
+	save := func(status string) error {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if status != "" {
+			r.Status = status
+		}
+		r.StopRequested, r.AbortRequested = stopRequested.Load(), abortRequested.Load()
+		r.Updated = time.Now()
+		return writeJSON(filepath.Join(dir, "run.json"), r)
+	}
+	observe := func() {
+		changed := false
+		if _, err := os.Stat(filepath.Join(dir, "STOP")); err == nil {
+			changed = stopRequested.CompareAndSwap(false, true)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "ABORT")); err == nil {
+			changed = abortRequested.CompareAndSwap(false, true) || changed
+		}
+		if abortRequested.Load() {
+			cancel()
+		}
+		if changed {
+			_ = save("")
+		}
+	}
 	stopStatus := func() string {
-		if aborted() {
+		if abortRequested.Load() {
 			return "aborted"
 		}
 		return "stopped"
@@ -242,9 +274,9 @@ func worker(dir string) (result error) {
 	if err = os.WriteFile(heartbeat, nil, 0600); err != nil {
 		return err
 	}
-	done := make(chan struct{})
-	defer close(done)
+	done, monitorDone := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(monitorDone)
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -252,36 +284,31 @@ func worker(dir string) (result error) {
 			case <-done:
 				return
 			case t := <-ticker.C:
-				if aborted() {
-					cancel()
-				}
+				observe()
 				_ = os.Chtimes(heartbeat, t, t)
 			}
 		}
 	}()
-	save := func(status string) error {
-		r.Status = status
-		r.Updated = time.Now()
-		return writeJSON(filepath.Join(dir, "run.json"), r)
-	}
+	defer func() { close(done); <-monitorDone }()
 	defer func() {
 		if result != nil {
 			if ctx.Err() != nil {
 				result = save(stopStatus())
 				return
 			}
+			stateMu.Lock()
 			r.Error = redactCredentials(result.Error())
+			stateMu.Unlock()
 			_ = save("failed")
 			fmt.Println("ralph: failed:", r.Error)
 		}
 	}()
-	r.PID = os.Getpid()
 	if err = save("preparing"); err != nil {
 		return err
 	}
 	stopped := func() bool {
-		_, err := os.Stat(filepath.Join(dir, "STOP"))
-		return err == nil || aborted() || ctx.Err() != nil
+		observe()
+		return stopRequested.Load() || abortRequested.Load() || ctx.Err() != nil
 	}
 	if stopped() {
 		return save(stopStatus())
@@ -305,6 +332,9 @@ func worker(dir string) (result error) {
 	if stopped() {
 		return save(stopStatus())
 	}
+	if err = os.MkdirAll(filepath.Dir(r.Worktree), 0700); err != nil {
+		return err
+	}
 	if _, err = command(setupCtx, r.Repo.Path, "git", "worktree", "add", "-b", r.Branch, r.Worktree, base); err != nil {
 		return err
 	}
@@ -313,7 +343,9 @@ func worker(dir string) (result error) {
 		if stopped() {
 			return save(stopStatus())
 		}
+		stateMu.Lock()
 		r.Iteration = i
+		stateMu.Unlock()
 		if err = save("running"); err != nil {
 			return err
 		}
@@ -343,14 +375,24 @@ func worker(dir string) (result error) {
 		cmd.Stdout = output
 		cmd.Stderr = cmd.Stdout
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		var killTimer *time.Timer
 		cmd.Cancel = func() error {
 			if cmd.Process == nil {
 				return nil
 			}
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if abortRequested.Load() {
+				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			// Timeout/shutdown allow a short flush; an explicit abort stays immediate.
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			killTimer = time.AfterFunc(2*time.Second, func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+			return err
 		}
 		cmd.WaitDelay = 3 * time.Second
 		err = cmd.Run()
+		if killTimer != nil && killTimer.Stop() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		iterationCancel()
 		flushErr := output.Flush()
 		closeErr := f.Close()

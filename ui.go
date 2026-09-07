@@ -453,11 +453,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshing = false
 		selected, _ := m.selectedRun()
 		m.runs = msg.runs
+		found := false
 		for i, r := range m.runs {
 			if r.ID == selected.ID {
+				found = true
 				m.runIndex = i
 				break
 			}
+		}
+		if !found {
+			m.runIndex = 0
+			m.logs.SetContent("Loading output…")
+			m.info.SetContent("")
+			if r, ok := m.selectedRun(); ok {
+				m.info.SetContent(runDetails(r))
+				return m, m.refresh()
+			}
+			m.logs.SetContent("No runs yet.")
+			return m, nil
 		}
 		m.runIndex = min(m.runIndex, max(0, len(m.runs)-1))
 		if r, ok := m.selectedRun(); ok && r.ID == msg.id {
@@ -528,6 +541,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = msg.err.Error()
 		} else {
 			m.notice = msg.text
+		}
+		if m.page == board {
+			return m, m.refresh()
 		}
 		return m, nil
 	case tea.KeyPressMsg:
@@ -756,6 +772,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, func() tea.Msg { return noticeMsg{"Stopping now. The worktree is preserved.", requestAbort(r)} }
+			}
+		case "d":
+			if r, ok := m.selectedRun(); ok && m.page == board && !r.active() && !r.External {
+				if m.demo {
+					m.notice = "Demo: clean, merged run removed."
+					return m, nil
+				}
+				return m, func() tea.Msg { return noticeMsg{"Clean, merged run removed.", pruneRun(r.Dir, time.Now())} }
 			}
 		case "s":
 			if r, ok := m.selectedRun(); ok && m.page == board {

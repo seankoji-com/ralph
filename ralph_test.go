@@ -125,12 +125,13 @@ func fixtureRun(t *testing.T, script string, max int) Run {
 	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("uncommitted user work\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	dir := filepath.Join(root, "runs", "fixture")
+	script = strings.ReplaceAll(script, "__RUN_DIR__", dir)
 	runner := filepath.Join(root, "fake-runner")
 	if err := os.WriteFile(runner, []byte("#!/bin/sh\nset -eu\n"+script+"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(root, "runs", "fixture")
-	r := Run{ID: "fixture", Repo: Repo{Name: "org/repo", Path: repo}, Prompt: "A literal prompt: $(touch should-never-exist)", Runner: runner, Model: "fake/test", Status: "queued", Max: max, Timeout: 1, Started: time.Now(), Updated: time.Now(), Dir: dir, Worktree: filepath.Join(dir, "worktree"), Branch: "codex/ralph-test"}
+	r := Run{ID: "fixture", Repo: Repo{Name: "org/repo", Path: repo}, Prompt: "A literal prompt: $(touch should-never-exist)", Runner: runner, Model: "fake/test", Status: "queued", Max: max, Timeout: 1, Started: time.Now(), Updated: time.Now(), Dir: dir, Worktree: filepath.Join(root, "worktrees", "fixture"), Branch: "codex/ralph-test"}
 	if err := writeJSON(filepath.Join(dir, "run.json"), r); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestWorkerFailureAndBudget(t *testing.T) {
 
 func TestWorkerGracefulStop(t *testing.T) {
 	r := fixtureRun(t, `echo current-iteration-finished
-touch ../STOP`, 4)
+touch "__RUN_DIR__/STOP"`, 4)
 	if err := worker(r.Dir); err != nil {
 		t.Fatal(err)
 	}
