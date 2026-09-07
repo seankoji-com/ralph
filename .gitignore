@@ -1,0 +1,4 @@
+/bin/
+/.ralph/
+*.test
+coverage.out
