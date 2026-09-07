@@ -15,7 +15,7 @@ import (
 func main() {
 	if len(os.Args) == 3 && os.Args[1] == "worker" {
 		if err := worker(os.Args[2]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
 			os.Exit(1)
 		}
 		return
@@ -25,6 +25,7 @@ func main() {
 	doctor := flag.Bool("doctor", false, "check local tools and provider configuration")
 	checkAI := flag.Bool("check-ai", false, "send a small test request to the configured LiteLLM model")
 	listModels := flag.Bool("models", false, "list models visible on the current prompt provider")
+	prune := flag.Bool("prune", false, "remove finished runs older than 30 days only when worktrees are clean and branches are merged")
 	colour := flag.String("color", "auto", "terminal colours: auto, always (true colour), or never")
 	flag.Parse()
 	var programOptions []tea.ProgramOption
@@ -39,6 +40,15 @@ func main() {
 		os.Exit(2)
 	}
 	c := loadConfig()
+	if *prune {
+		removed, kept, err := pruneRuns(c, time.Now().Add(-30*24*time.Hour))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
+			os.Exit(1)
+		}
+		fmt.Printf("Removed %d old runs; preserved %d recent, unfinished, or unsafe-to-remove runs.\n", removed, kept)
+		return
+	}
 	if *snapshot {
 		renderSnapshot(c)
 		return
@@ -62,7 +72,7 @@ func main() {
 		defer cancel()
 		answer, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "Reply with only: Ralph is ready."}}, false)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
 			os.Exit(1)
 		}
 		fmt.Println(safeText(answer))
@@ -71,7 +81,7 @@ func main() {
 	if *listModels {
 		ids, err := providerModels(context.Background(), c)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
 			os.Exit(1)
 		}
 		for _, id := range ids {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -39,7 +40,7 @@ type Run struct {
 }
 
 func (r Run) active() bool {
-	return r.Status == "queued" || r.Status == "preparing" || r.Status == "running" || r.Status == "cooldown" || r.Status == "stopping"
+	return r.Status == "queued" || r.Status == "preparing" || r.Status == "running" || r.Status == "cooldown" || r.Status == "stopping" || r.Status == "aborting"
 }
 func (r Run) logPath() string {
 	if r.External {
@@ -112,6 +113,13 @@ func requestStop(r Run) error {
 	return os.WriteFile(filepath.Join(r.Dir, "STOP"), []byte("stop after current iteration\n"), 0600)
 }
 
+func requestAbort(r Run) error {
+	if r.External || !r.active() {
+		return fmt.Errorf("only active native runs can be stopped immediately")
+	}
+	return os.WriteFile(filepath.Join(r.Dir, "ABORT"), []byte("stop now\n"), 0600)
+}
+
 func loadRuns(c Config, repos []Repo) []Run {
 	entries, _ := os.ReadDir(filepath.Join(c.StateDir, "runs"))
 	runs := []Run{}
@@ -133,6 +141,8 @@ func loadRuns(c Config, repos []Repo) []Run {
 			if time.Since(last) > 20*time.Second {
 				r.Status = "interrupted"
 				r.Error = "Worker heartbeat lost. Worktree and logs are preserved."
+			} else if _, err := os.Stat(filepath.Join(dir, "ABORT")); err == nil {
+				r.Status = "aborting"
 			} else if _, err := os.Stat(filepath.Join(dir, "STOP")); err == nil {
 				r.Status = "stopping"
 			}
@@ -221,6 +231,13 @@ func worker(dir string) (result error) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	aborted := func() bool { _, err := os.Stat(filepath.Join(dir, "ABORT")); return err == nil }
+	stopStatus := func() string {
+		if aborted() {
+			return "aborted"
+		}
+		return "stopped"
+	}
 	heartbeat := filepath.Join(dir, "heartbeat")
 	if err = os.WriteFile(heartbeat, nil, 0600); err != nil {
 		return err
@@ -228,13 +245,16 @@ func worker(dir string) (result error) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-done:
 				return
 			case t := <-ticker.C:
+				if aborted() {
+					cancel()
+				}
 				_ = os.Chtimes(heartbeat, t, t)
 			}
 		}
@@ -246,18 +266,25 @@ func worker(dir string) (result error) {
 	}
 	defer func() {
 		if result != nil {
-			r.Error = result.Error()
+			if ctx.Err() != nil {
+				result = save(stopStatus())
+				return
+			}
+			r.Error = redactCredentials(result.Error())
 			_ = save("failed")
-			fmt.Println("ralph: failed:", result)
+			fmt.Println("ralph: failed:", r.Error)
 		}
 	}()
 	r.PID = os.Getpid()
 	if err = save("preparing"); err != nil {
 		return err
 	}
-	stopped := func() bool { _, err := os.Stat(filepath.Join(dir, "STOP")); return err == nil || ctx.Err() != nil }
+	stopped := func() bool {
+		_, err := os.Stat(filepath.Join(dir, "STOP"))
+		return err == nil || aborted() || ctx.Err() != nil
+	}
 	if stopped() {
-		return save("stopped")
+		return save(stopStatus())
 	}
 	fmt.Printf("ralph: preparing %s on %s\n", r.Repo.Name, r.Branch)
 	setupCtx, setupCancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -276,7 +303,7 @@ func worker(dir string) (result error) {
 		}
 	}
 	if stopped() {
-		return save("stopped")
+		return save(stopStatus())
 	}
 	if _, err = command(setupCtx, r.Repo.Path, "git", "worktree", "add", "-b", r.Branch, r.Worktree, base); err != nil {
 		return err
@@ -284,23 +311,36 @@ func worker(dir string) (result error) {
 	fmt.Printf("ralph: worktree %s\n", r.Worktree)
 	for i := 1; i <= r.Max; i++ {
 		if stopped() {
-			return save("stopped")
+			return save(stopStatus())
 		}
 		r.Iteration = i
 		if err = save("running"); err != nil {
 			return err
 		}
 		fmt.Printf("\nralph: ── iteration %d/%d ── %s\n", i, r.Max, time.Now().Format(time.RFC3339))
-		prompt := r.Prompt + fmt.Sprintf("\n\nRalph loop iteration %d of %d. Work only in this dedicated worktree. Read .ralph-ledger.md if present and update it with progress, validation, and remaining work before finishing. Do not overwrite unrelated changes. Do not publish, merge, or send messages unless the task explicitly authorizes it. If the entire task is complete and verified, print <ralph>COMPLETE</ralph> on a line by itself at the end of your final response. Otherwise leave concrete next steps in the ledger.", i, r.Max)
+		var nonce [16]byte
+		if _, err = rand.Read(nonce[:]); err != nil {
+			return err
+		}
+		token := hex.EncodeToString(nonce[:])
+		completionPath := filepath.Join(r.Worktree, ".ralph-complete.json")
+		if err = os.Remove(completionPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		signal := completionSignal{Token: token, Iteration: i}
+		payload, _ := json.Marshal(signal)
+		prompt := r.Prompt + fmt.Sprintf("\n\nRalph loop iteration %d of %d. Work only in this dedicated worktree. Read .ralph-ledger.md if present and update it with progress, validation, and remaining work before finishing. Do not overwrite unrelated changes. Do not publish, merge, or send messages unless the task explicitly authorizes it. If the entire task is complete and verified, write this exact JSON to .ralph-complete.json: %s. Do not commit this completion file; Ralph removes it after reading. Otherwise leave concrete next steps in the ledger and do not create the completion file.", i, r.Max, payload)
 		iterationLog := filepath.Join(dir, fmt.Sprintf("iteration-%02d.log", i))
 		f, err := os.OpenFile(iterationLog, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return err
 		}
 		iterationCtx, iterationCancel := context.WithTimeout(ctx, time.Duration(r.Timeout)*time.Minute)
-		cmd := exec.CommandContext(iterationCtx, r.Runner, "run", "--standalone", "--auto", "--model", r.Model, prompt)
+		cmd := exec.CommandContext(iterationCtx, r.Runner, "run", "--standalone", "--auto", "--model", r.Model, "--", prompt)
 		cmd.Dir = r.Worktree
-		cmd.Stdout = io.MultiWriter(os.Stdout, f)
+		cmd.Env = append(os.Environ(), "RALPH_COMPLETION_TOKEN="+token, fmt.Sprintf("RALPH_ITERATION=%d", i))
+		output := &redactingWriter{dst: io.MultiWriter(os.Stdout, f)}
+		cmd.Stdout = output
 		cmd.Stderr = cmd.Stdout
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -312,9 +352,10 @@ func worker(dir string) (result error) {
 		cmd.WaitDelay = 3 * time.Second
 		err = cmd.Run()
 		iterationCancel()
+		flushErr := output.Flush()
 		closeErr := f.Close()
 		if ctx.Err() != nil {
-			return save("stopped")
+			return save(stopStatus())
 		}
 		if err != nil {
 			return fmt.Errorf("iteration %d: %w (see iteration log)", i, err)
@@ -322,12 +363,19 @@ func worker(dir string) (result error) {
 		if closeErr != nil {
 			return closeErr
 		}
-		if completeOutput(tailFile(iterationLog, 8192)) {
+		if flushErr != nil {
+			return flushErr
+		}
+		complete := readCompletion(completionPath, signal)
+		if err = os.Remove(completionPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if complete {
 			fmt.Println("\nralph: task complete. Nice work, Ralph.")
 			return save("complete")
 		}
 		if stopped() {
-			return save("stopped")
+			return save(stopStatus())
 		}
 		if i < r.Max {
 			if err = save("cooldown"); err != nil {
@@ -335,11 +383,11 @@ func worker(dir string) (result error) {
 			}
 			for s := 0; s < r.Cooldown; s++ {
 				if stopped() {
-					return save("stopped")
+					return save(stopStatus())
 				}
 				select {
 				case <-ctx.Done():
-					return save("stopped")
+					return save(stopStatus())
 				case <-time.After(time.Second):
 				}
 			}
@@ -349,7 +397,16 @@ func worker(dir string) (result error) {
 	return save("budget reached")
 }
 
-func completeOutput(s string) bool {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	return len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "<ralph>COMPLETE</ralph>"
+type completionSignal struct {
+	Token     string `json:"token"`
+	Iteration int    `json:"iteration"`
+}
+
+func readCompletion(path string, want completionSignal) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1024 {
+		return false
+	}
+	var got completionSignal
+	return readJSON(path, &got) == nil && got == want
 }

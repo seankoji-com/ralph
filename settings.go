@@ -25,7 +25,7 @@ func (o RunOptions) validate() error {
 	if o.Timeout < 1 || o.Timeout > 240 {
 		return fmt.Errorf("iteration timeout must be 1 to 240 minutes")
 	}
-	if strings.TrimSpace(o.Model) == "" {
+	if strings.TrimSpace(o.Model) == "" || strings.HasPrefix(strings.TrimSpace(o.Model), "-") {
 		return fmt.Errorf("choose a runner model")
 	}
 	return nil

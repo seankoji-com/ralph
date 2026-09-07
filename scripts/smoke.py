@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
     gh.write_text('#!/bin/sh\nprintf \'[[{"full_name":"ralph-fixture/example","description":"Detached smoke fixture"}]]\\n\'\n')
     gh.chmod(0o700)
     agent = fakebin / "opencode2"
-    agent.write_text("#!/bin/sh\nset -eu\nsleep 3\nprintf 'Verified fixture work.\\n' > .ralph-ledger.md\nprintf '<ralph>COMPLETE</ralph>\\n'\n")
+    agent.write_text("#!/bin/sh\nset -eu\nsleep 3\nprintf 'Verified fixture work.\\n' > .ralph-ledger.md\nprintf '{\"token\":\"%s\",\"iteration\":%s}' \"$RALPH_COMPLETION_TOKEN\" \"$RALPH_ITERATION\" > .ralph-complete.json\necho COMPLETE\n")
     agent.chmod(0o700)
     env["PATH"] = str(fakebin) + os.pathsep + env["PATH"]
     env["RALPH_RUNNER"] = str(agent)

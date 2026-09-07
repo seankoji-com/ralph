@@ -150,7 +150,7 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, clockTick(), func() tea.Msg { return reposMsg{repos: localRepos(m.config)} })
 }
 func clockTick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func (m model) refresh() tea.Cmd {
@@ -749,6 +749,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c := m.config
 				return m, func() tea.Msg { repo, e := cloneRepo(c, r); return clonedMsg{repo, e} }
 			}
+		case "x":
+			if r, ok := m.selectedRun(); ok && m.page == board {
+				if m.demo {
+					m.notice = "Demo: Ralph will stop now."
+					return m, nil
+				}
+				return m, func() tea.Msg { return noticeMsg{"Stopping now. The worktree is preserved.", requestAbort(r)} }
+			}
 		case "s":
 			if r, ok := m.selectedRun(); ok && m.page == board {
 				if m.demo {
@@ -798,7 +806,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func safeText(s string) string {
-	s = ansi.Strip(s)
+	s = redactCredentials(ansi.Strip(s))
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return r
@@ -814,9 +822,9 @@ func statusStyle(s string) lipgloss.Style {
 	switch s {
 	case "running", "complete":
 		return lipgloss.NewStyle().Foreground(green)
-	case "failed", "interrupted":
+	case "failed", "interrupted", "aborted":
 		return lipgloss.NewStyle().Foreground(red)
-	case "cooldown", "stopping", "budget reached":
+	case "cooldown", "stopping", "aborting", "budget reached":
 		return lipgloss.NewStyle().Foreground(amber)
 	}
 	return dim

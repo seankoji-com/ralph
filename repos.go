@@ -27,7 +27,7 @@ func command(ctx context.Context, dir, name string, args ...string) (string, err
 	cmd.Dir = dir
 	b, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("%s: %w: %s", name, err, redactCredentials(strings.TrimSpace(string(b))))
 	}
 	return strings.TrimSpace(string(b)), nil
 }

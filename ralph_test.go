@@ -143,7 +143,8 @@ count=0
 if [ -f .ralph-ledger.md ]; then count=$(cat .ralph-ledger.md); fi
 count=$((count + 1))
 printf '%s' "$count" > .ralph-ledger.md
-if [ "$count" -eq 2 ]; then printf '<ralph>COMPLETE</ralph>\n'; fi`, 4)
+if [ "$count" -eq 2 ]; then printf '{"token":"%s","iteration":%s}' "$RALPH_COMPLETION_TOKEN" "$RALPH_ITERATION" > .ralph-complete.json; fi
+echo trailing-runner-banner`, 4)
 	if err := worker(r.Dir); err != nil {
 		t.Fatal(err)
 	}
@@ -244,9 +245,7 @@ func TestTailAndTerminalSafety(t *testing.T) {
 	if safeText("\x1b[31mhello\x1b[0m\x1b]52;c;payload\a\x00") != "hello" {
 		t.Fatal("terminal control sequence survived")
 	}
-	if completeOutput("prompt includes <ralph>COMPLETE</ralph>") || !completeOutput("all done\n<ralph>COMPLETE</ralph>\n") {
-		t.Fatal("completion marker matching")
-	}
+
 }
 
 func TestDraftRecoveryAndDemoIsolation(t *testing.T) {

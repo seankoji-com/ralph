@@ -41,6 +41,7 @@ If colours are missing, run `./bin/ralph --color always`. Automatic mode respect
 | Output, details or conversation | `ctrl+b` / `ctrl+f`, scroll wheel | Scroll back / forward |
 | Output | `f` | Follow the latest output |
 | Loops | `s` | Stop after the current iteration |
+| Loops | `x` | Stop the current agent immediately; preserve the worktree |
 | Main screens | `?` / `q` | Help / quit |
 | Everywhere | `ctrl+c` | Save the open draft and quit; loops continue |
 
@@ -79,16 +80,16 @@ Before each workshop reply or draft, Ralph reads the current provider's authenti
 Launch fetches `origin` and creates a dedicated worktree from its default branch on `codex/ralph-<run-id>`. Every iteration starts a new process:
 
 ```text
-opencode2 run --standalone --auto --model <model> <prompt>
+opencode2 run --standalone --auto --model <model> -- <prompt>
 ```
 
 The agent has its normal configured tool permissions. `--auto` runs unattended. A worktree isolates file edits; it is not a security sandbox or a limit on external tool actions.
 
 Ralph asks the agent to carry progress in `.ralph-ledger.md`. It does not reset or rebase between iterations, so unfinished changes stay available. Dependencies are the agent's responsibility according to each repo's instructions. The original checkout is left alone.
 
-Defaults are five iterations, a 15-second rest and a 30-minute timeout per iteration. A non-zero exit or timeout stops the run. A final standalone `<ralph>COMPLETE</ralph>` line marks completion; reaching the iteration budget is recorded separately. Completion is the agent's report, not independent verification. `s` creates a stop request, allowing the current iteration to finish.
+Defaults are five iterations, a 15-second rest and a 30-minute timeout per iteration. A non-zero exit or timeout stops the run. The agent marks completion by writing `.ralph-complete.json` with the current iteration and a fresh token supplied in its prompt. Ralph validates and removes the file; log text cannot mark completion. Reaching the iteration budget is recorded separately. Completion is the agent's report, not independent verification. `s` creates a stop request, allowing the current iteration to finish. `x` requests an immediate abort and kills the current agent process group. Both preserve the worktree.
 
-Each private `runs/<id>/` directory contains `run.json`, `prompt.md`, `output.log`, per-iteration logs, a worker heartbeat and the worktree. Log viewing reads only the latest 128 KiB and strips terminal control sequences. Full logs remain on disk. A lost heartbeat is shown as interrupted; Ralph never guesses that an interrupted run succeeded. Worktrees and logs are retained until you remove them yourself with Git's worktree tooling.
+Each private `runs/<id>/` directory contains `run.json`, `prompt.md`, `output.log`, per-iteration logs, a worker heartbeat and the worktree. Log viewing reads only the latest 128 KiB and strips terminal control sequences. URL credentials are redacted before native output is saved; logs can still contain source code and other sensitive content printed by the agent. A lost heartbeat is shown as interrupted; Ralph never guesses that an interrupted run succeeded. The board refreshes every five seconds. `./bin/ralph --prune` removes finished runs older than 30 days only when their worktree is clean (including ignored files) and their branch is merged into the locally known origin default branch. Fetch that repository first to update the merge check. Dirty, unmerged, active and uncertain runs are preserved; Git worktree tooling remains available for manual cleanup.
 
 Existing `~/repos/*/.ralph/logs/*.log` files are grouped by run and appear as external script logs. These are read-only: the old scripts have no heartbeat, so the app shows last-write activity rather than claiming they are running or complete. Keep using the script's `scripts/ralph/STOP` file to stop those runs. Zooma's original script, npm setup and issue-count guard remain unchanged; the app's native runner is a general coding loop.
 
