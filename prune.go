@@ -45,6 +45,14 @@ func pruneRun(dir string, before time.Time) error {
 		return err
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	agentLock, err := agentLease(dir)
+	if err != nil {
+		return err
+	}
+	defer agentLock.Close()
+	if agentMayBeAlive(dir) {
+		return fmt.Errorf("agent process group may still be alive; worktree preserved")
+	}
 	var r Run
 	if err = readJSON(filepath.Join(dir, "run.json"), &r); err != nil {
 		return err
@@ -163,6 +171,14 @@ func recoverInterrupted(r Run) Run {
 	if current.active() && time.Since(current.Updated) > 20*time.Second {
 		current.Status = "interrupted"
 		current.Error = "Worker heartbeat lost. Worktree and logs are preserved."
+		agentLock, err := agentLease(r.Dir)
+		if err != nil || agentMayBeAlive(r.Dir) {
+			current.Status = "orphaned"
+			current.Error = "Worker heartbeat lost; agent may still be alive. The guardian stops it on worker death. Cleanup is blocked until its lock and process group are gone. If both supervisors were force-killed, inspect agent.json for the group ID before stopping it manually."
+		}
+		if agentLock != nil {
+			agentLock.Close()
+		}
 		if writeJSON(filepath.Join(r.Dir, "run.json"), current) != nil {
 			return r
 		}

@@ -858,7 +858,7 @@ func statusStyle(s string) lipgloss.Style {
 	switch s {
 	case "running", "complete":
 		return lipgloss.NewStyle().Foreground(green)
-	case "failed", "interrupted", "aborted", "unreadable":
+	case "failed", "interrupted", "aborted", "unreadable", "orphaned":
 		return lipgloss.NewStyle().Foreground(red)
 	case "cooldown", "stopping", "aborting", "budget reached":
 		return lipgloss.NewStyle().Foreground(amber)

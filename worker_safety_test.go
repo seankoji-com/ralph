@@ -300,3 +300,53 @@ while :; do sleep 1; done`, 3)
 		t.Fatalf("state=%s", got.Status)
 	}
 }
+
+func TestGuardianStopsAgentAfterWorkerSIGKILL(t *testing.T) {
+	r := fixtureRun(t, `trap 'sleep 1; exit 0' TERM
+touch "__RUN_DIR__/agent-started"
+while :; do sleep 1; done`, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWorkerShutdownGrace$")
+	cmd.Env = append(os.Environ(), "RALPH_TEST_WORKER_DIR="+r.Dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	var agent agentRecord
+	for {
+		_, ready := os.Stat(filepath.Join(r.Dir, "agent-started"))
+		if ready == nil && readJSON(filepath.Join(r.Dir, "agent.json"), &agent) == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			_ = cmd.Wait()
+			t.Fatal("agent did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	// Make the record prune-eligible while the guardian is still stopping the
+	// live agent. The independent lease must veto deletion, even on a clean tree.
+	r.Status = "interrupted"
+	r.Updated = time.Now().Add(-time.Hour)
+	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneRun(r.Dir, time.Now()); err == nil {
+		t.Fatal("pruned beneath a live agent")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for syscall.Kill(-agent.PGID, 0) != syscall.ESRCH {
+		if time.Now().After(deadline) {
+			t.Fatal("agent survived worker SIGKILL")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(r.Worktree); err != nil {
+		t.Fatal("worktree lost", err)
+	}
+}

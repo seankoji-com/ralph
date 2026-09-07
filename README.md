@@ -84,6 +84,8 @@ Launch fetches `origin` and creates a dedicated worktree from its default branch
 opencode2 run --standalone --auto --model <model> -- <prompt>
 ```
 
+A guardian launches each agent, holds an independent run lock, and watches an anonymous pipe owned by the worker. If the worker dies, including from SIGKILL, the pipe closes and the guardian stops the agent. `agent.json` records the agent process group; cleanup checks both the lease and group liveness. If both supervisors are force-killed, a surviving agent is shown as orphaned and cleanup stays blocked. Historical group IDs are never used to send signals because they may have been reused. Inspect that record before manual recovery.
+
 The agent has its normal configured tool permissions. `--auto` runs unattended. A worktree isolates file edits; it is not a security sandbox or a limit on external tool actions.
 
 Ralph asks the agent to carry progress in `.ralph-ledger.md`. It does not reset or rebase between iterations, so unfinished changes stay available. Dependencies are the agent's responsibility according to each repo's instructions. The original checkout is left alone.

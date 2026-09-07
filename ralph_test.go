@@ -16,6 +16,16 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 4 && os.Args[1] == "guardian" {
+		if err := guardian(os.Args[2], os.Args[3:]); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 func TestAssistantConversation(t *testing.T) {
 	var received struct {
 		Model    string    `json:"model"`

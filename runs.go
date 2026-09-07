@@ -44,7 +44,7 @@ type Run struct {
 }
 
 func (r Run) active() bool {
-	return r.Status == "queued" || r.Status == "preparing" || r.Status == "running" || r.Status == "cooldown" || r.Status == "stopping" || r.Status == "aborting"
+	return r.Status == "queued" || r.Status == "preparing" || r.Status == "running" || r.Status == "cooldown" || r.Status == "stopping" || r.Status == "aborting" || r.Status == "orphaned"
 }
 func (r Run) logPath() string {
 	if r.External {
@@ -108,6 +108,9 @@ func launchRun(c Config, repo Repo, prompt string, options RunOptions) (Run, err
 }
 
 func requestStop(r Run) error {
+	if r.Status == "orphaned" {
+		return fmt.Errorf("worker unavailable; inspect %s before manual agent recovery", filepath.Join(r.Dir, "agent.json"))
+	}
 	if r.External {
 		return fmt.Errorf("external logs are read-only; use the script's STOP file")
 	}
@@ -118,6 +121,9 @@ func requestStop(r Run) error {
 }
 
 func requestAbort(r Run) error {
+	if r.Status == "orphaned" {
+		return fmt.Errorf("guardian could not finish recovery; inspect %s before manually stopping the process group", filepath.Join(r.Dir, "agent.json"))
+	}
 	if r.External || !r.active() {
 		return fmt.Errorf("only active native runs can be stopped immediately")
 	}
@@ -376,31 +382,10 @@ func worker(dir string) (result error) {
 			return err
 		}
 		iterationCtx, iterationCancel := context.WithTimeout(ctx, time.Duration(r.Timeout)*time.Minute)
-		cmd := exec.CommandContext(iterationCtx, r.Runner, "run", "--standalone", "--auto", "--model", r.Model, "--", prompt)
-		cmd.Dir = r.Worktree
-		cmd.Env = append(os.Environ(), "RALPH_COMPLETION_TOKEN="+token, fmt.Sprintf("RALPH_ITERATION=%d", i))
 		output := &redactingWriter{dst: io.MultiWriter(os.Stdout, f)}
-		cmd.Stdout = output
-		cmd.Stderr = cmd.Stdout
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		var killTimer *time.Timer
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return nil
-			}
-			if abortRequested.Load() {
-				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-			// Timeout/shutdown allow a short flush; an explicit abort stays immediate.
-			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			killTimer = time.AfterFunc(2*time.Second, func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
-			return err
-		}
-		cmd.WaitDelay = 3 * time.Second
-		err = cmd.Run()
-		if killTimer != nil && killTimer.Stop() {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		args := []string{r.Runner, "run", "--standalone", "--auto", "--model", r.Model, "--", prompt}
+		env := append(os.Environ(), "RALPH_COMPLETION_TOKEN="+token, fmt.Sprintf("RALPH_ITERATION=%d", i))
+		err = runGuarded(iterationCtx, dir, r.Worktree, args, env, output, &abortRequested)
 		iterationCancel()
 		flushErr := output.Flush()
 		closeErr := f.Close()

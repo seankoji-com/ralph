@@ -95,6 +95,9 @@ func (m model) actions() []stationAction {
 	case repositories:
 		return []stationAction{{"enter", "Enter  Open", pink}, {"/", "/  Find", violet}, {"c", "C  Clone", mint}, {"r", "R  Refresh", cyan}, {"esc", "Esc  Loops", violet}}
 	default:
+		if r, ok := m.selectedRun(); ok && r.Status == "orphaned" {
+			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Recovery details", amber}, {"f", "F  Follow", mint}, {"?", "?  Help", cyan}}
+		}
 		if r, ok := m.selectedRun(); ok && !r.active() && !r.External {
 			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"f", "F  Follow", mint}, {"d", "D  Remove clean run", amber}, {"?", "?  Help", cyan}}
 		}

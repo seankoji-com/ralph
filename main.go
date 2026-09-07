@@ -13,6 +13,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) >= 4 && os.Args[1] == "guardian" {
+		if err := guardian(os.Args[2], os.Args[3:]); err != nil {
+			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "worker" {
 		if err := worker(os.Args[2]); err != nil {
 			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
