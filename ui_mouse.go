@@ -30,6 +30,9 @@ func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	mouse := msg.Mouse()
 	layout := m.layout()
 	hit := layout.hit(mouse.X, mouse.Y)
+	if m.pendingDelete != nil && hit.id != "y" && hit.id != "esc" {
+		return m, nil
+	}
 	if m.palette != nil {
 		switch msg.(type) {
 		case tea.MouseClickMsg:

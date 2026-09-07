@@ -93,10 +93,22 @@ func writeJSON(path string, v any) error {
 		f.Close()
 		return err
 	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err = f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	if err = os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func readJSON(path string, v any) error {

@@ -74,32 +74,72 @@ func pruneRun(dir string, before time.Time) error {
 		return fmt.Errorf("run directory is missing or a symlink")
 	}
 	info, err := os.Lstat(r.Worktree)
-	if err != nil || !info.IsDir() {
-		return fmt.Errorf("worktree is missing or not a directory")
+	worktreeExists := err == nil
+	if (err != nil && !os.IsNotExist(err)) || (worktreeExists && !info.IsDir()) {
+		return fmt.Errorf("worktree is not a directory")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	branch, err := command(ctx, r.Worktree, "git", "symbolic-ref", "--short", "HEAD")
-	if err != nil || branch != r.Branch {
-		return fmt.Errorf("worktree branch changed")
+	registered := worktreeExists
+	if !worktreeExists {
+		list, err := command(ctx, r.Repo.Path, "git", "worktree", "list", "--porcelain", "-z")
+		if err != nil {
+			return err
+		}
+		canonical := func(path string) string {
+			parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+			if err != nil {
+				return filepath.Clean(path)
+			}
+			return filepath.Join(parent, filepath.Base(path))
+		}
+		for _, field := range strings.Split(list, "\x00") {
+			if strings.HasPrefix(field, "worktree ") && canonical(strings.TrimPrefix(field, "worktree ")) == canonical(r.Worktree) {
+				registered = true
+			}
+		}
 	}
-	status, err := command(ctx, r.Worktree, "git", "status", "--porcelain", "--ignored")
-	if err != nil || status != "" {
-		return fmt.Errorf("worktree contains local files or changes")
+	if worktreeExists {
+		branch, err := command(ctx, r.Worktree, "git", "symbolic-ref", "--short", "HEAD")
+		if err != nil || branch != r.Branch {
+			return fmt.Errorf("worktree branch changed")
+		}
+		status, err := command(ctx, r.Worktree, "git", "status", "--porcelain", "--ignored")
+		if err != nil || status != "" {
+			return fmt.Errorf("worktree contains local files or changes")
+		}
 	}
-	base, err := command(ctx, r.Repo.Path, "git", "symbolic-ref", "refs/remotes/origin/HEAD")
-	if err != nil || !strings.HasPrefix(base, "refs/remotes/origin/") {
-		return fmt.Errorf("default branch is unknown")
-	}
-	if _, err = command(ctx, r.Repo.Path, "git", "merge-base", "--is-ancestor", r.Branch, base); err != nil {
-		return fmt.Errorf("branch contains unmerged commits")
-	}
-	if _, err = command(ctx, r.Repo.Path, "git", "worktree", "remove", r.Worktree); err != nil {
+	// Enumerate refs rather than treating any Git error as a missing branch.
+	refs, err := command(ctx, r.Repo.Path, "git", "for-each-ref", "--format=%(refname)", "refs/heads/"+r.Branch)
+	if err != nil {
 		return err
 	}
-	if _, err = command(ctx, r.Repo.Path, "git", "branch", "-d", r.Branch); err != nil {
-		return err
+	branchExists := false
+	for _, ref := range strings.Split(refs, "\n") {
+		if ref == "refs/heads/"+r.Branch {
+			branchExists = true
+		}
 	}
+	if branchExists {
+		base, err := command(ctx, r.Repo.Path, "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+		if err != nil || !strings.HasPrefix(base, "refs/remotes/origin/") {
+			return fmt.Errorf("default branch is unknown")
+		}
+		if _, err = command(ctx, r.Repo.Path, "git", "merge-base", "--is-ancestor", r.Branch, base); err != nil {
+			return fmt.Errorf("branch contains unmerged commits")
+		}
+	}
+	if registered {
+		if _, err = command(ctx, r.Repo.Path, "git", "worktree", "remove", r.Worktree); err != nil {
+			return err
+		}
+	}
+	if branchExists {
+		if _, err = command(ctx, r.Repo.Path, "git", "branch", "-d", r.Branch); err != nil {
+			return err
+		}
+	}
+
 	return os.RemoveAll(dir)
 }
 

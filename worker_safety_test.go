@@ -92,6 +92,56 @@ func TestRedactionAcrossWrites(t *testing.T) {
 	}
 }
 
+func TestLargeStreamingOutput(t *testing.T) {
+	plain := strings.Repeat("x", 2*1024*1024)
+	for _, input := range []string{plain, "https://user:" + strings.Repeat("secret", 20000) + "@example.com\n" + plain} {
+		var b bytes.Buffer
+		w := &redactingWriter{dst: &b}
+		if _, err := w.Write([]byte(input)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(b.String(), plain) || strings.Contains(b.String(), "secret") {
+			t.Fatal("lost ordinary output or leaked credential")
+		}
+	}
+}
+
+func TestUnreadableRunRemainsVisible(t *testing.T) {
+	c := Config{StateDir: t.TempDir()}
+	dir := filepath.Join(c.StateDir, "runs", "broken")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runs := loadRuns(c, nil)
+	if len(runs) != 1 || runs[0].Status != "unreadable" || runs[0].Dir != dir {
+		t.Fatalf("invisible run: %+v", runs)
+	}
+}
+
+func TestPruneRetriesAfterWorktreeRemoval(t *testing.T) {
+	r := fixtureRun(t, "echo done", 1)
+	r.Branch = "codex/ralph-" + r.ID
+	_ = writeJSON(filepath.Join(r.Dir, "run.json"), r)
+	if err := worker(r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := command(context.Background(), r.Repo.Path, "git", "worktree", "remove", r.Worktree); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneRun(r.Dir, time.Now()); err != nil {
+		t.Fatal("partial cleanup not retryable", err)
+	}
+	if _, err := os.Stat(r.Dir); !os.IsNotExist(err) {
+		t.Fatal("run retained after successful retry")
+	}
+}
+
 func TestPrunePreservesWork(t *testing.T) {
 	for _, kind := range []string{"clean", "interrupted", "stale", "dirty", "ignored", "unmerged", "active", "recent", "locked"} {
 		t.Run(kind, func(t *testing.T) {
@@ -246,7 +296,7 @@ while :; do sleep 1; done`, 3)
 	}
 	var got Run
 	_ = readJSON(filepath.Join(r.Dir, "run.json"), &got)
-	if got.Status != "stopped" {
+	if got.Status != "interrupted" {
 		t.Fatalf("state=%s", got.Status)
 	}
 }

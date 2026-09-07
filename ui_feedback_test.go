@@ -122,3 +122,18 @@ func TestRemovedSelectionClearsOldOutput(t *testing.T) {
 		t.Fatal("stale output retained or refresh missing")
 	}
 }
+
+func TestRemoveRunRequiresConfirmation(t *testing.T) {
+	m := newModel(Config{}, true)
+	m.runs = []Run{{ID: "keep-my-logs", Status: "complete"}}
+	updated, cmd := m.Update(actionKey("d"))
+	m = updated.(model)
+	if cmd != nil || m.pendingDelete == nil || !strings.Contains(m.notice, "keep-my-logs") {
+		t.Fatal("delete was not confirmed against a named run")
+	}
+	updated, cmd = m.Update(actionKey("esc"))
+	m = updated.(model)
+	if cmd != nil || m.pendingDelete != nil {
+		t.Fatal("cancel failed")
+	}
+}

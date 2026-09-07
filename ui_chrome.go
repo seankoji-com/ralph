@@ -78,6 +78,9 @@ type stationAction struct {
 }
 
 func (m model) actions() []stationAction {
+	if m.pendingDelete != nil {
+		return []stationAction{{"y", "Y  Remove run and logs", red}, {"esc", "Esc  Keep run", mint}}
+	}
 	if m.settings != nil {
 		return []stationAction{{"enter", "Enter  Next / save", mint}, {"shift+tab", "Previous", violet}, {"esc", "Esc  Cancel", pink}}
 	}

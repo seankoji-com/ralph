@@ -133,7 +133,12 @@ func loadRuns(c Config, repos []Repo) []Run {
 		}
 		dir := filepath.Join(c.StateDir, "runs", entry.Name())
 		var r Run
-		if readJSON(filepath.Join(dir, "run.json"), &r) != nil {
+		if err := readJSON(filepath.Join(dir, "run.json"), &r); err != nil {
+			r = Run{ID: entry.Name(), Dir: dir, Repo: Repo{Name: "Unknown repository"}, Status: "unreadable", Error: "Run metadata could not be read: " + redactCredentials(err.Error()) + ". Logs are preserved at " + dir + "; inspect this directory to recover the run."}
+			if info, err := entry.Info(); err == nil {
+				r.Started, r.Updated = info.ModTime(), info.ModTime()
+			}
+			runs = append(runs, r)
 			continue
 		}
 		r.Dir = dir
@@ -267,6 +272,9 @@ func worker(dir string) (result error) {
 	stopStatus := func() string {
 		if abortRequested.Load() {
 			return "aborted"
+		}
+		if !stopRequested.Load() && ctx.Err() != nil {
+			return "interrupted"
 		}
 		return "stopped"
 	}

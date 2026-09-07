@@ -80,6 +80,7 @@ type draftState struct {
 type model struct {
 	chatContent                                      string
 	palette                                          *commandPalette
+	pendingDelete                                    *Run
 	config                                           Config
 	page                                             screen
 	width, height                                    int
@@ -547,6 +548,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.pendingDelete != nil {
+			r := *m.pendingDelete
+			m.pendingDelete = nil
+			if msg.String() == "y" {
+				if m.demo {
+					m.notice = "Demo: run removed."
+					return m, nil
+				}
+				return m, func() tea.Msg { return noticeMsg{"Clean, merged run removed.", pruneRun(r.Dir, time.Now())} }
+			}
+			m.notice = "Removal cancelled."
+			return m, nil
+		}
 		key := msg.String()
 		if key == "ctrl+c" {
 			if err := m.saveDraft(); err != nil {
@@ -775,11 +789,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "d":
 			if r, ok := m.selectedRun(); ok && m.page == board && !r.active() && !r.External {
-				if m.demo {
-					m.notice = "Demo: clean, merged run removed."
-					return m, nil
-				}
-				return m, func() tea.Msg { return noticeMsg{"Clean, merged run removed.", pruneRun(r.Dir, time.Now())} }
+				m.pendingDelete = &r
+				m.notice = "Permanently remove " + r.ID + " and all its logs? Y confirms; any other key cancels."
+				return m, nil
 			}
 		case "s":
 			if r, ok := m.selectedRun(); ok && m.page == board {
@@ -846,7 +858,7 @@ func statusStyle(s string) lipgloss.Style {
 	switch s {
 	case "running", "complete":
 		return lipgloss.NewStyle().Foreground(green)
-	case "failed", "interrupted", "aborted":
+	case "failed", "interrupted", "aborted", "unreadable":
 		return lipgloss.NewStyle().Foreground(red)
 	case "cooldown", "stopping", "aborting", "budget reached":
 		return lipgloss.NewStyle().Foreground(amber)
