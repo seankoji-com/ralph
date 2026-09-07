@@ -142,6 +142,19 @@ func TestPruneRetriesAfterWorktreeRemoval(t *testing.T) {
 	}
 }
 
+func TestPrunePreservesRunsWithoutAgentMetadata(t *testing.T) {
+	r := fixtureRun(t, "echo done", 1)
+	if err := worker(r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(r.Dir, "agent.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneRun(r.Dir, time.Now()); err == nil || !strings.Contains(err.Error(), "liveness") {
+		t.Fatalf("unknown agent was not protected: %v", err)
+	}
+}
+
 func TestPrunePreservesWork(t *testing.T) {
 	for _, kind := range []string{"clean", "interrupted", "stale", "dirty", "ignored", "unmerged", "active", "recent", "locked"} {
 		t.Run(kind, func(t *testing.T) {

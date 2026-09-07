@@ -57,6 +57,9 @@ func pruneRun(dir string, before time.Time) error {
 	if err = readJSON(filepath.Join(dir, "run.json"), &r); err != nil {
 		return err
 	}
+	if _, err := os.Stat(filepath.Join(dir, "agent.json")); r.Iteration > 0 && os.IsNotExist(err) {
+		return fmt.Errorf("run has no agent liveness record; inspect it manually before cleanup")
+	}
 	switch r.Status {
 	case "complete", "failed", "stopped", "aborted", "budget reached", "interrupted":
 	default:
@@ -172,7 +175,8 @@ func recoverInterrupted(r Run) Run {
 		current.Status = "interrupted"
 		current.Error = "Worker heartbeat lost. Worktree and logs are preserved."
 		agentLock, err := agentLease(r.Dir)
-		if err != nil || agentMayBeAlive(r.Dir) {
+		_, metadataErr := os.Stat(filepath.Join(r.Dir, "agent.json"))
+		if err != nil || agentMayBeAlive(r.Dir) || (current.Iteration > 0 && os.IsNotExist(metadataErr)) {
 			current.Status = "orphaned"
 			current.Error = "Worker heartbeat lost; agent may still be alive. The guardian stops it on worker death. Cleanup is blocked until its lock and process group are gone. If both supervisors were force-killed, inspect agent.json for the group ID before stopping it manually."
 		}

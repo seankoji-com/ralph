@@ -7,7 +7,6 @@ from pathlib import Path
 import pty
 import re
 import select
-import signal
 import struct
 import subprocess
 import sys
@@ -81,6 +80,21 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
     def send(text):
         os.write(master, text.encode())
 
+    def worker_finished():
+        state = json.loads(state_path.read_text())
+        if state["status"] in ("queued", "preparing", "running", "cooldown", "stopping", "aborting", "orphaned"):
+            return False
+        for name in ("worker.lock", "agent.lock"):
+            path = state_path.parent / name
+            if not path.exists():
+                continue
+            with path.open("rb") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
+        return True
+
     try:
         wait_for(lambda: re.search(rb"\x1b\[[0-9;]*38;2;", output), "Lip Gloss true-colour output")
         screen("LOOP STATION")
@@ -106,6 +120,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
         process.wait(timeout=5)
         assert process.returncode == 0
         wait_for(lambda: json.loads(state_path.read_text())["status"] == "complete", "worker completed after TUI quit")
+        wait_for(worker_finished, "worker and guardian released the fixture")
         state = json.loads(state_path.read_text())
         assert state["iteration"] == 1
         assert (Path(state["worktree"]) / ".ralph-ledger.md").read_text() == "Verified fixture work.\n"
@@ -118,11 +133,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
             process.terminate()
             process.wait(timeout=5)
         if state_path and state_path.exists():
-            state = json.loads(state_path.read_text())
-            if state["status"] in ("queued", "preparing", "running", "cooldown") and state.get("pid"):
-                try:
-                    os.kill(state["pid"], signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                time.sleep(1)
+            if not worker_finished():
+                (state_path.parent / "ABORT").write_text("smoke fixture cleanup\n")
+                wait_for(worker_finished, "fixture stopped before cleanup")
         os.close(master)
