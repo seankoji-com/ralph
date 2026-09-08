@@ -67,8 +67,8 @@ func TestE2ECheckAIFallsBackToDevPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(exe)
-	cmd.Env = append(withoutEnv(os.Environ(), "RALPH_LITELLM_URL", "RALPH_LITELLM_API_KEY", "LITELLM_API_KEY", "DEVPASS_API_KEY", "RALPH_DEVPASS_URL", "RALPH_MODEL", "RALPH_ASSIST_MODEL", "RALPH_STATE_DIR", "RALPH_FALLBACK_MODEL", "OPENCODE2_ROOT", "XDG_CONFIG_HOME", "RALPH_E2E_MAIN"),
-		"RALPH_E2E_MAIN=1", "RALPH_STATE_DIR="+filepath.Join(root, "state"), "OPENCODE2_ROOT="+root, "XDG_CONFIG_HOME="+filepath.Join(root, "empty"))
+	cmd.Env = append(withoutEnv(os.Environ(), "RALPH_LITELLM_URL", "RALPH_LITELLM_API_KEY", "LITELLM_API_KEY", "DEVPASS_API_KEY", "RALPH_DEVPASS_URL", "RALPH_MODEL", "RALPH_ASSIST_MODEL", "RALPH_STATE_DIR", "RALPH_FALLBACK_MODEL", "RALPH_FALLBACK_PROVIDER", "OPENCODE2_ROOT", "XDG_CONFIG_HOME", "RALPH_E2E_MAIN"),
+		"RALPH_E2E_MAIN=1", "RALPH_FALLBACK_PROVIDER=devpass", "RALPH_STATE_DIR="+filepath.Join(root, "state"), "OPENCODE2_ROOT="+root, "XDG_CONFIG_HOME="+filepath.Join(root, "empty"))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("ralph --check-ai failed: %v\n%s", err, output)
@@ -146,7 +146,7 @@ func TestAssistantErrorDoesNotExposeProxyBody(t *testing.T) {
 		fmt.Fprint(w, `{"data":[{"id":"test"}]}`)
 	}))
 	defer fallback.Close()
-	_, _, err := askAssistant(context.Background(), Config{BaseURL: server.URL, AssistModel: "test", DevPassURL: fallback.URL, DevPassAPIKey: "fallback-key"}, Repo{}, nil, false)
+	_, _, err := askAssistant(context.Background(), Config{FallbackEnabled: true, BaseURL: server.URL, AssistModel: "test", DevPassURL: fallback.URL, DevPassAPIKey: "fallback-key"}, Repo{}, nil, false)
 	if err == nil || strings.Contains(err.Error(), "secret-should-not-leak") || !strings.Contains(err.Error(), "401") {
 		t.Fatal(err)
 	}

@@ -219,7 +219,7 @@ func (m model) layout() stationLayout {
 			}
 			editor := m.composerView()
 			route := "LiteLLM · conversation saved locally"
-			if m.config.DevPassAPIKey != "" {
+			if len(promptProviders(m.config)) > 1 {
 				route = "LiteLLM → DevPass on outage · sends full conversation"
 			}
 			body = heading + "\n" + dim.Render(clip(route, m.workshopWidth())) + "\n" + chat + "\n" + editor

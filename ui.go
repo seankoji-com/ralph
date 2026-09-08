@@ -965,7 +965,7 @@ func (m model) boardView() string {
 	title := accent.Render(clip(r.Repo.Name, max(24, m.width-55)))
 	meta := statusStyle(r.Status).Render(r.Status) + "  " + meter(r.Iteration, r.Max, 12) + "  " + dim.Render(age(r.Started))
 	if r.ActiveModel != "" && r.ActiveModel != r.Model {
-		meta = lipgloss.NewStyle().Foreground(amber).Render("Fallback · " + safeText(r.ActiveModel))
+		meta = statusStyle(r.Status).Render(r.Status) + " " + dim.Render(fmt.Sprintf("%d/%d · %s", r.Iteration, r.Max, age(r.Started))) + "  " + lipgloss.NewStyle().Foreground(amber).Render("Fallback · "+safeText(r.ActiveModel))
 	}
 	view := scrolledView(m.logs)
 	if m.details {

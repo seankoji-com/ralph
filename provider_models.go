@@ -21,7 +21,7 @@ type promptProvider struct {
 
 func promptProviders(c Config) []promptProvider {
 	providers := []promptProvider{{name: "LiteLLM", baseURL: c.BaseURL, apiKey: c.APIKey}}
-	if c.DevPassAPIKey != "" {
+	if c.FallbackEnabled && c.DevPassAPIKey != "" && c.DevPassURL != "" {
 		providers = append(providers, promptProvider{name: "DevPass", baseURL: c.DevPassURL, apiKey: c.DevPassAPIKey})
 	}
 	return providers
@@ -37,6 +37,14 @@ func endpointURL(baseURL, endpoint string) (string, error) {
 }
 
 func providerRequest(ctx context.Context, c Config, method, endpoint string, body []byte) (*http.Response, string, error) {
+	// Bound callers without a deadline, and reserve the final third for fallback.
+	ctx, cancelRequest := context.WithTimeout(ctx, 90*time.Second)
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			cancelRequest()
+		}
+	}()
 	providers := promptProviders(c)
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var failures []error
@@ -53,8 +61,13 @@ func providerRequest(ctx context.Context, c Config, method, endpoint string, bod
 		}
 		attemptCtx := ctx
 		cancel := func() {}
-		if endpoint == "models" && i < len(providers)-1 {
-			attemptCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		if i < len(providers)-1 {
+			deadline, _ := ctx.Deadline()
+			budget := time.Until(deadline) * 2 / 3
+			if endpoint == "models" {
+				budget = min(budget, 10*time.Second)
+			}
+			attemptCtx, cancel = context.WithTimeout(ctx, budget)
 		}
 		req, err := http.NewRequestWithContext(attemptCtx, method, target, bytes.NewReader(body))
 		if err != nil {
@@ -67,7 +80,8 @@ func providerRequest(ctx context.Context, c Config, method, endpoint string, bod
 		}
 		response, err := client.Do(req)
 		if err == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-			response.Body = &cancelOnClose{ReadCloser: response.Body, cancel: cancel}
+			succeeded = true
+			response.Body = &cancelOnClose{ReadCloser: response.Body, cancel: func() { cancel(); cancelRequest() }}
 			return response, provider.name, nil
 		}
 		cancel()

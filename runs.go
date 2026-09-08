@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -73,13 +74,21 @@ func launchRun(c Config, repo Repo, prompt string, options RunOptions) (Run, err
 	if err != nil {
 		return Run{}, err
 	}
+	fallback := c.fallbackModel(options.Model)
+	if fallback != "" && fallback != options.Model {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := validateRunnerFallback(ctx, runner, repo.Path, fallback); err != nil {
+			return Run{}, err
+		}
+	}
 	var random [4]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return Run{}, err
 	}
 	id := time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(random[:])
 	dir := filepath.Join(c.StateDir, "runs", id)
-	r := Run{ID: id, Repo: repo, Prompt: prompt, Model: options.Model, FallbackModel: c.fallbackModel(options.Model), Runner: runner, Status: "queued", Max: options.Max, Cooldown: options.Cooldown, Timeout: options.Timeout, Started: time.Now(), Updated: time.Now(), Dir: dir, Branch: "codex/ralph-" + id, Worktree: filepath.Join(c.StateDir, "worktrees", id)}
+	r := Run{ID: id, Repo: repo, Prompt: prompt, Model: options.Model, FallbackModel: fallback, Runner: runner, Status: "queued", Max: options.Max, Cooldown: options.Cooldown, Timeout: options.Timeout, Started: time.Now(), Updated: time.Now(), Dir: dir, Branch: "codex/ralph-" + id, Worktree: filepath.Join(c.StateDir, "worktrees", id)}
 	if err := writeJSON(filepath.Join(dir, "run.json"), r); err != nil {
 		return r, err
 	}
@@ -395,7 +404,8 @@ func worker(dir string) (result error) {
 				f.Close()
 				return flushErr
 			}
-			if canRetryProvider(iterationCtx, r.Model, r.FallbackModel, err, captured.String()) && !stopped() {
+			primaryErr := fmt.Errorf("%s: %w; %s", r.Model, err, lastDiagnostic(captured.String()))
+			if canRetryProvider(iterationCtx, r.Model, r.FallbackModel, err, captured.String()) && retryBudgetAvailable(iterationCtx, time.Duration(r.Timeout)*time.Minute) && !stopped() {
 				stateMu.Lock()
 				r.ActiveModel = r.FallbackModel
 				stateMu.Unlock()
@@ -409,6 +419,12 @@ func worker(dir string) (result error) {
 						err = runGuarded(iterationCtx, dir, r.Worktree, runnerArgs(r.Runner, r.FallbackModel, prompt), env, output, &abortRequested)
 					}
 				}
+				if err != nil {
+					err = errors.Join(primaryErr, fmt.Errorf("%s: %w", r.FallbackModel, err))
+				}
+			} else if r.FallbackModel != "" {
+				_, _ = fmt.Fprintln(output, "ralph: fallback skipped (unrecognised outage, insufficient time, or stop requested); diagnostic:", lastDiagnostic(captured.String()))
+				err = primaryErr
 			}
 		}
 		iterationCancel()
@@ -461,26 +477,56 @@ func runnerArgs(runner, model, prompt string) []string {
 	return []string{runner, "run", "--standalone", "--auto", "--model", model, "--", prompt}
 }
 
+func validateRunnerFallback(ctx context.Context, runner, repo, model string) error {
+	_, _, ok := strings.Cut(model, "/")
+	if !ok {
+		return fmt.Errorf("fallback must use provider/model form")
+	}
+	output, err := command(ctx, repo, runner, "models", "--standalone")
+	if err != nil {
+		return fmt.Errorf("cannot validate fallback %s: %w", model, err)
+	}
+	for _, id := range strings.Fields(safeText(output)) {
+		if id == model {
+			return nil
+		}
+	}
+	return fmt.Errorf("runner cannot resolve fallback %s; configure its provider/model or disable RALPH_FALLBACK_PROVIDER", model)
+}
+
+func retryBudgetAvailable(ctx context.Context, total time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return ctx.Err() == nil && (!ok || time.Until(deadline) >= total/3)
+}
+
+func lastDiagnostic(output string) string {
+	lines := strings.Split(strings.TrimSpace(safeText(output)), "\n")
+	for i := len(lines) - 1; i >= max(0, len(lines)-8); i-- {
+		line := strings.ToLower(lines[i])
+		if strings.Contains(line, "error") || strings.Contains(line, "request failed:") {
+			return clip(strings.TrimSpace(lines[i]), 300)
+		}
+	}
+	return clip(strings.TrimSpace(lines[len(lines)-1]), 300)
+}
+
 // The timeout is the total iteration budget, including a possible retry.
 func canRetryProvider(ctx context.Context, model, fallback string, err error, output string) bool {
 	return ctx.Err() == nil && fallback != "" && fallback != model && providerUnavailable(err, output)
 }
 
-// Runner text is not a structured error channel. Only inspect its final
-// diagnostic, never arbitrary file contents or earlier tool output.
+// Runner text is not a structured error channel. Inspect the last diagnostic
+// within eight tail lines, tolerating decorations and trailing summaries.
 func providerUnavailable(err error, output string) bool {
 	if err == nil {
 		return false
 	}
-	text := strings.ToLower(strings.TrimSpace(safeText(output)))
-	if index := strings.LastIndexByte(text, '\n'); index >= 0 {
-		text = strings.TrimSpace(text[index+1:])
-	}
-	if !strings.HasPrefix(text, "error:") && !strings.HasPrefix(text, "request failed:") {
+	text := strings.ToLower(lastDiagnostic(output))
+	if !strings.Contains(text, "error") && !strings.Contains(text, "request failed:") {
 		return false
 	}
 	for _, marker := range []string{
-		"connection refused", "connection reset", "econnrefused", "econnreset", "enotfound", "etimedout",
+		"connection refused", "connectionrefused", "connection reset", "econnrefused", "econnreset", "enotfound", "etimedout",
 		"no such host", "network error", "failed to connect", "fetch failed",
 		"provider unavailable", "service unavailable", "temporarily unavailable",
 		"http 408", "http 429", "http 500", "http 502", "http 503", "http 504",

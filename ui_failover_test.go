@@ -36,7 +36,7 @@ func TestWorkshopFallbackAttributionSurvivesDraftRestore(t *testing.T) {
 		fmt.Fprint(w, `{"choices":[{"message":{"content":"A verified fixture reply."}}]}`)
 	}))
 	defer fallback.Close()
-	c := Config{StateDir: t.TempDir(), Model: "litellm/coder", AssistModel: "assistant", BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "fixture"}
+	c := Config{FallbackEnabled: true, StateDir: t.TempDir(), Model: "litellm/coder", AssistModel: "assistant", BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "fixture"}
 	m := newModel(c, false)
 	repo := Repo{Name: "org/fixture"}
 	m.openWorkshop(repo)
@@ -64,7 +64,7 @@ func TestWorkshopFallbackAttributionSurvivesDraftRestore(t *testing.T) {
 
 func TestFallbackVisibleBeforeSendingAndOnBoard(t *testing.T) {
 	for _, size := range [][2]int{{64, 24}, {80, 30}, {110, 34}, {160, 50}} {
-		m := newModel(Config{DevPassAPIKey: "fixture", Model: "litellm/coder"}, true)
+		m := newModel(Config{FallbackEnabled: true, DevPassURL: "http://fixture.invalid", DevPassAPIKey: "fixture", Model: "litellm/coder"}, true)
 		m.openWorkshop(m.repos[0])
 		updated, _ := m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
 		m = updated.(model)

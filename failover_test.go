@@ -33,7 +33,7 @@ func TestSlowHealthyCompletionDoesNotFallBack(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	resp, provider, err := providerRequest(ctx, Config{BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "fallback-key"}, http.MethodPost, "chat/completions", []byte(`{}`))
+	resp, provider, err := providerRequest(ctx, Config{FallbackEnabled: true, BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "fallback-key"}, http.MethodPost, "chat/completions", []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestProviderFailuresRetainBothCauses(t *testing.T) {
 			defer primary.Close()
 			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "fallback-secret", status) }))
 			defer fallback.Close()
-			resp, provider, err := providerRequest(context.Background(), Config{BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "key"}, http.MethodGet, "models", nil)
+			resp, provider, err := providerRequest(context.Background(), Config{FallbackEnabled: true, BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "key"}, http.MethodGet, "models", nil)
 			if resp != nil || err == nil || provider != "DevPass" {
 				t.Fatalf("resp=%v provider=%s err=%v", resp, provider, err)
 			}
@@ -60,7 +60,7 @@ func TestProviderFailuresRetainBothCauses(t *testing.T) {
 			}
 		})
 	}
-	_, provider, err := providerRequest(context.Background(), Config{BaseURL: ":bad", DevPassURL: ":bad", DevPassAPIKey: "key"}, http.MethodGet, "models", nil)
+	_, provider, err := providerRequest(context.Background(), Config{FallbackEnabled: true, BaseURL: ":bad", DevPassURL: ":bad", DevPassAPIKey: "key"}, http.MethodGet, "models", nil)
 	if err == nil || provider != "DevPass" || !strings.Contains(err.Error(), "RALPH_DEVPASS_URL") || !strings.Contains(err.Error(), "RALPH_LITELLM_URL") {
 		t.Fatalf("provider=%s err=%v", provider, err)
 	}
@@ -96,7 +96,7 @@ func TestProviderHTTPRetryAndCredentialIsolation(t *testing.T) {
 				fmt.Fprint(w, "fallback")
 			}))
 			defer fallback.Close()
-			resp, provider, err := providerRequest(context.Background(), Config{BaseURL: primary.URL + "/v1", APIKey: "primary-key", DevPassURL: fallback.URL + "/v1", DevPassAPIKey: "fallback-key"}, http.MethodPost, "chat/completions", []byte(payload))
+			resp, provider, err := providerRequest(context.Background(), Config{FallbackEnabled: true, BaseURL: primary.URL + "/v1", APIKey: "primary-key", DevPassURL: fallback.URL + "/v1", DevPassAPIKey: "fallback-key"}, http.MethodPost, "chat/completions", []byte(payload))
 			if resp != nil {
 				resp.Body.Close()
 			}
@@ -128,7 +128,7 @@ func TestProviderTransportFailureFallsBack(t *testing.T) {
 	defer fallback.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, provider, err := providerRequest(ctx, Config{BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "fixture"}, http.MethodGet, "models", nil)
+	resp, provider, err := providerRequest(ctx, Config{FallbackEnabled: true, BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "fixture"}, http.MethodGet, "models", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +136,95 @@ func TestProviderTransportFailureFallsBack(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "recovered" || provider != "DevPass" {
 		t.Fatalf("body=%s provider=%s err=%v", body, provider, err)
+	}
+}
+
+func TestHungPrimaryReservesFallbackTime(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "recovered") }))
+	defer fallback.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	resp, provider, err := providerRequest(ctx, Config{FallbackEnabled: true, BaseURL: primary.URL, DevPassURL: fallback.URL, DevPassAPIKey: "fixture"}, http.MethodPost, "chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if provider != "DevPass" || ctx.Err() != nil {
+		t.Fatal("primary exhausted the fallback budget")
+	}
+}
+
+func TestFallbackRequiresOptInAndDestination(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE2_ROOT", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("DEVPASS_API_KEY", "ambient-fixture")
+	t.Setenv("RALPH_FALLBACK_PROVIDER", "")
+	t.Setenv("RALPH_DEVPASS_URL", "http://fixture.invalid/v1")
+	t.Setenv("RALPH_FALLBACK_MODEL", "devpass/fixture")
+	c := loadConfig()
+	if len(promptProviders(c)) != 1 || c.fallbackModel("litellm/fixture") != "" {
+		t.Fatal("ambient key or model enabled egress")
+	}
+	t.Setenv("RALPH_FALLBACK_PROVIDER", "devpass")
+	t.Setenv("RALPH_DEVPASS_URL", "")
+	c = loadConfig()
+	if len(promptProviders(c)) != 1 || c.DevPassURL != "" {
+		t.Fatal("hardcoded destination enabled")
+	}
+	t.Setenv("RALPH_DEVPASS_URL", "https://user:secret@fixture.invalid/v1?key=secret")
+	c = loadConfig()
+	if len(promptProviders(c)) != 2 || c.fallbackDestination() != "https://fixture.invalid/v1" {
+		t.Fatal("opt-in failed or doctor leaks secrets")
+	}
+}
+
+func TestRealRunnerOutageTranscriptAndDecorations(t *testing.T) {
+	// Captured from opencode2 v0.0.0-beta-19296 with an isolated config,
+	// dummy key and closed loopback port. Only ANSI colour was removed.
+	data, err := os.ReadFile("testdata/opencode2-connection-refused.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{string(data), "✗ Error: HTTP 503\nSession summary", "[ERROR] HTTP 503\nShutdown complete"} {
+		if !providerUnavailable(errors.New("exit status 1"), output) {
+			t.Fatalf("unrecognised diagnostic: %q", output)
+		}
+	}
+	for _, remaining := range []time.Duration{time.Millisecond, time.Second, 19 * time.Second} {
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		if retryBudgetAvailable(ctx, time.Minute) {
+			t.Fatal("retry with unusable budget")
+		}
+		cancel()
+	}
+}
+
+func TestLaunchRejectsUnknownFallbackBeforeCreatingRun(t *testing.T) {
+	r := fixtureRun(t, `if [ "$1" = models ]; then echo devpass/other; exit 0; fi
+touch "__RUN_DIR__/should-not-start"`, 1)
+	c := Config{FallbackEnabled: true, StateDir: filepath.Join(t.TempDir(), "new-state"), Runner: r.Runner, FallbackModel: "devpass/missing"}
+	_, err := launchRun(c, r.Repo, "Fixture only", RunOptions{Model: "litellm/fixture", Max: 1, Timeout: 1})
+	if err == nil || !strings.Contains(err.Error(), "cannot resolve fallback") {
+		t.Fatalf("missing fallback accepted: %v", err)
+	}
+	if _, err := os.Stat(c.StateDir); !os.IsNotExist(err) {
+		t.Fatal("invalid route persisted a run")
+	}
+}
+
+func TestWorkerPreservesBothAttemptErrors(t *testing.T) {
+	r := fixtureRun(t, `if [ "$5" = fake/test ]; then echo 'Error: HTTP 503' >&2; else echo 'Error: unknown model' >&2; fi
+exit 1`, 1)
+	r.FallbackModel = "devpass/missing"
+	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	err := worker(r.Dir)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "devpass/missing") {
+		t.Fatalf("primary lost: %v", err)
 	}
 }
 
@@ -154,7 +243,7 @@ func TestProviderCancellationNeverFallsBack(t *testing.T) {
 			if preCancelled {
 				cancel()
 			}
-			_, _, err := providerRequest(ctx, Config{BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "key"}, http.MethodPost, "chat/completions", nil)
+			_, _, err := providerRequest(ctx, Config{FallbackEnabled: true, BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "key"}, http.MethodPost, "chat/completions", nil)
 			want := int32(1)
 			if preCancelled {
 				want = 0
@@ -176,7 +265,7 @@ func TestFallbackUsesSelectedModelAndExplicitOverride(t *testing.T) {
 		{"litellm/selected", "", "", ""},
 		{"anthropic/claude-x", "devpass/explicit", "", "devpass/explicit"},
 	} {
-		c := Config{Model: "litellm/default", FallbackModel: tc.override, DevPassAPIKey: tc.key}
+		c := Config{FallbackEnabled: true, DevPassURL: "http://fixture.invalid", Model: "litellm/default", FallbackModel: tc.override, DevPassAPIKey: tc.key}
 		if got := c.fallbackModel(tc.selected); got != tc.want {
 			t.Errorf("%+v: got %q", tc, got)
 		}
@@ -281,14 +370,15 @@ exit 1`, 1)
 }
 
 func TestE2ELaunchSelectedModelFallbackAndPersistAttribution(t *testing.T) {
-	r := fixtureRun(t, `echo "$5" >> "__RUN_DIR__/attempts"
+	r := fixtureRun(t, `if [ "$1" = models ]; then echo devpass/selected; exit 0; fi
+echo "$5" >> "__RUN_DIR__/attempts"
 if [ "$5" = 'litellm/selected' ]; then
   printf '{"token":"%s","iteration":%s}' "$RALPH_COMPLETION_TOKEN" "$RALPH_ITERATION" > .ralph-complete.json
   echo 'Error: HTTP 503' >&2
   exit 1
 fi
 echo 'Fallback ran without claiming completion'`, 1)
-	c := Config{StateDir: filepath.Dir(filepath.Dir(r.Dir)), Runner: r.Runner, Model: "litellm/default", DevPassAPIKey: "fixture-key"}
+	c := Config{FallbackEnabled: true, DevPassURL: "http://fixture.invalid", StateDir: filepath.Dir(filepath.Dir(r.Dir)), Runner: r.Runner, Model: "litellm/default", DevPassAPIKey: "fixture-key"}
 	launched, err := launchRun(c, r.Repo, "Fixture prompt", RunOptions{Model: "litellm/selected", Max: 1, Timeout: 1})
 	if err != nil {
 		t.Fatal(err)

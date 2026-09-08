@@ -77,6 +77,17 @@ func main() {
 			}
 		}
 		fmt.Printf("LiteLLM endpoint configured: %t\nLiteLLM key configured: %t\n", c.BaseURL != "", c.APIKey != "")
+		fmt.Printf("DevPass fallback opted in: %t\nDevPass destination: %s\nDevPass key configured: %t\n", c.FallbackEnabled, c.fallbackDestination(), c.DevPassAPIKey != "")
+		if fallback := c.fallbackModel(c.Model); fallback != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err := validateRunnerFallback(ctx, c.Runner, "", fallback)
+			cancel()
+			if err != nil {
+				fmt.Printf("INVALID fallback: %s\n", redactCredentials(err.Error()))
+			} else {
+				fmt.Printf("OK fallback model: %s\n", fallback)
+			}
+		}
 		fmt.Printf("Local org repos: %d\n", len(localRepos(c)))
 		return
 	}

@@ -25,6 +25,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
     env.update(RALPH_ORG="ralph-fixture", RALPH_REPOS_DIR=str(root / "repos"),
                RALPH_STATE_DIR=str(root / "state"), GIT_CONFIG_GLOBAL=str(root / "gitconfig"),
                RALPH_MODEL="litellm/smoke", RALPH_FALLBACK_MODEL="devpass/smoke",
+               RALPH_FALLBACK_PROVIDER="devpass",
                OPENCODE2_ROOT=str(root / "opencode2"), XDG_CONFIG_HOME=str(root / "config"),
                GIT_CONFIG_NOSYSTEM="1", TERM="xterm-256color", COLORTERM="truecolor")
 
@@ -53,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
     gh.write_text('#!/bin/sh\nprintf \'[[{"full_name":"ralph-fixture/example","description":"Detached smoke fixture"}]]\\n\'\n')
     gh.chmod(0o700)
     agent = fakebin / "opencode2"
-    agent.write_text("#!/bin/sh\nset -eu\nif [ \"$5\" = 'litellm/smoke' ]; then\n  echo 'Error: HTTP 503' >&2\n  exit 1\nfi\nsleep 8\nprintf 'Verified fixture work.\\n' > .ralph-ledger.md\nprintf '{\"token\":\"%s\",\"iteration\":%s}' \"$RALPH_COMPLETION_TOKEN\" \"$RALPH_ITERATION\" > .ralph-complete.json\necho COMPLETE\n")
+    agent.write_text("#!/bin/sh\nset -eu\nif [ \"$1\" = models ]; then echo devpass/smoke; exit 0; fi\nif [ \"$5\" = 'litellm/smoke' ]; then\n  echo 'Error: HTTP 503' >&2\n  exit 1\nfi\nsleep 8\nprintf 'Verified fixture work.\\n' > .ralph-ledger.md\nprintf '{\"token\":\"%s\",\"iteration\":%s}' \"$RALPH_COMPLETION_TOKEN\" \"$RALPH_ITERATION\" > .ralph-complete.json\necho COMPLETE\n")
     agent.chmod(0o700)
     env["PATH"] = str(fakebin) + os.pathsep + env["PATH"]
     env["RALPH_RUNNER"] = str(agent)

@@ -50,7 +50,7 @@ func TestHealthyPrimaryResponseSurvivesUntilBodyIsRead(t *testing.T) {
 		fmt.Fprint(w, "complete response")
 	}))
 	defer server.Close()
-	resp, _, err := providerRequest(context.Background(), Config{BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "fallback"}, http.MethodGet, "models", nil)
+	resp, _, err := providerRequest(context.Background(), Config{FallbackEnabled: true, BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "fallback"}, http.MethodGet, "models", nil)
 	close(release)
 	if err != nil {
 		t.Fatal(err)
