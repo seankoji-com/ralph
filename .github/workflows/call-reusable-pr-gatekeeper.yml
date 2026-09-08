@@ -8,6 +8,8 @@
 name: PR Gatekeeper
 
 on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
   # The wildcard is deliberate and load-bearing: `workflows` is a REQUIRED key
   # with minItems 1, so it cannot be omitted, and an enumerated list would go
   # stale the moment a repo adds a workflow. check_run/check_suite cannot be
@@ -50,6 +52,7 @@ jobs:
     #   - `pull_requests` is empty on fork runs, so the event allowlist is what
     #     keeps fork PRs gated rather than ignored.
     if: >-
+      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.name != 'PR Gatekeeper' &&
        (github.event.workflow_run.pull_requests[0] != null ||
@@ -61,8 +64,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head_sha }}
+          RECONCILE_OPEN: ${{ github.event_name == 'schedule' }}
         run: |
-          python3 - --repo "$GITHUB_REPOSITORY" --sha "$HEAD_SHA" <<'PY'
+          if [ "$RECONCILE_OPEN" = true ]; then
+            set -- --repo "$GITHUB_REPOSITORY" --reconcile-open
+          else
+            set -- --repo "$GITHUB_REPOSITORY" --sha "$HEAD_SHA"
+          fi
+          python3 - "$@" <<'PY'
           #!/usr/bin/env python3
           """Aggregator gate: one check run that blocks on ANY red check, not just the
           hand-listed required ones.
@@ -106,6 +115,7 @@ jobs:
           import json
           import os
           import sys
+          import time
           import urllib.error
           import urllib.request
 
@@ -145,7 +155,7 @@ jobs:
                   if name == GATE_CHECK_NAME:
                       continue
                   app = run.get("app") or {}
-                  key = (app.get("id"), name)
+                  key = (app.get("id"), (run.get("check_suite") or {}).get("id"), name)
                   current = latest.get(key)
                   if current is None or _latest_key(run) >= _latest_key(current):
                       latest[key] = run
@@ -221,6 +231,25 @@ jobs:
               )
 
 
+          def _request_json(req: urllib.request.Request) -> object:
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          return json.loads(resp.read().decode())
+                  except urllib.error.HTTPError as exc:
+                      retryable = exc.code >= 500 or exc.code == 429 or (
+                          exc.code == 403 and (exc.headers.get("Retry-After") or exc.headers.get("X-RateLimit-Remaining") == "0")
+                      )
+                      exc.close()
+                      if not retryable or attempt == 2:
+                          raise
+                  except (urllib.error.URLError, OSError):
+                      if attempt == 2:
+                          raise
+                  time.sleep(2 ** attempt)
+              raise RuntimeError("request retry exhausted")
+
+
           def _get(path: str, token: str) -> object:
               req = urllib.request.Request(
                   f"{API}{path}",
@@ -231,8 +260,7 @@ jobs:
                       "User-Agent": "seankoji-pr-gatekeeper",
                   },
               )
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  return json.loads(resp.read().decode())
+              return _request_json(req)
 
 
           def _post(path: str, token: str, body: dict) -> object:
@@ -248,8 +276,16 @@ jobs:
                       "User-Agent": "seankoji-pr-gatekeeper",
                   },
               )
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  return json.loads(resp.read().decode())
+              return _request_json(req)
+
+
+          def _batch(payload: object, key: str) -> list[dict]:
+              if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+                  raise ValueError(f"invalid {key} response")
+              batch = payload[key]
+              if not all(isinstance(item, dict) for item in batch):
+                  raise ValueError(f"invalid {key} item")
+              return batch
 
 
           def collect(repo: str, sha: str, token: str) -> tuple[list, dict, list]:
@@ -263,13 +299,25 @@ jobs:
                       f"?filter=latest&per_page=100&page={page}",
                       token,
                   )
-                  batch = (payload or {}).get("check_runs") or []
+                  batch = _batch(payload, "check_runs")
                   runs.extend(batch)
                   if len(batch) < 100:
                       break
                   page += 1
 
-              statuses = _get(f"/repos/{repo}/commits/{sha}/status?per_page=100", token) or {}
+              statuses = None
+              page = 1
+              while True:
+                  payload = _get(f"/repos/{repo}/commits/{sha}/status?per_page=100&page={page}", token)
+                  batch = _batch(payload, "statuses")
+                  if not isinstance(payload.get("total_count"), int) or payload["total_count"] < 0:
+                      raise ValueError("invalid status count")
+                  if statuses is None:
+                      statuses = dict(payload, statuses=[])
+                  statuses["statuses"].extend(batch)
+                  if len(batch) < 100:
+                      break
+                  page += 1
 
               suites: list = []
               page = 1
@@ -277,7 +325,7 @@ jobs:
                   payload = _get(
                       f"/repos/{repo}/commits/{sha}/check-suites?per_page=100&page={page}", token
                   )
-                  batch = (payload or {}).get("check_suites") or []
+                  batch = _batch(payload, "check_suites")
                   suites.extend(batch)
                   if len(batch) < 100:
                       break
@@ -286,54 +334,59 @@ jobs:
               return runs, statuses, suites
 
 
-          def main(argv: list[str]) -> int:
-              parser = argparse.ArgumentParser(description=__doc__)
-              parser.add_argument("--repo", required=True, help="owner/name")
-              parser.add_argument("--sha", required=True, help="head commit SHA")
-              parser.add_argument(
-                  "--dry-run",
-                  action="store_true",
-                  help="evaluate and print, but do not post the check run",
-              )
-              args = parser.parse_args(argv)
-
-              token = os.environ.get("GITHUB_TOKEN", "")
-              if not token:
-                  print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
-                  return 2
-
+          def report(repo: str, sha: str, token: str, dry_run: bool = False) -> int:
               try:
-                  runs, statuses, suites = collect(args.repo, args.sha, token)
-              except (urllib.error.URLError, OSError, ValueError) as exc:
-                  # A read failure must never read as green.
-                  print(f"::error::could not read check state for {args.sha}: {exc}", file=sys.stderr)
-                  return 2
-
-              status, conclusion, title, summary = evaluate(runs, statuses, suites)
+                  runs, statuses, suites = collect(repo, sha, token)
+                  status, conclusion, title, summary = evaluate(runs, statuses, suites)
+              except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError) as exc:
+                  # The job lives on main, so put read/shape failures on the PR too.
+                  status, conclusion = "completed", "failure"
+                  title = "Could not read check state"
+                  summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
+                  print(f"::error::{title}: {exc}", file=sys.stderr)
               print(f"{status} / {conclusion or '-'}: {title}")
-              print(summary)
-
-              if args.dry_run:
+              if dry_run:
                   return 0
-
-              body: dict = {
-                  "name": GATE_CHECK_NAME,
-                  "head_sha": args.sha,
-                  "status": status,
-                  "output": {"title": title, "summary": summary},
-              }
+              body = {"name": GATE_CHECK_NAME, "head_sha": sha, "status": status,
+                      "output": {"title": title, "summary": summary}}
               if status == "completed":
-                  # Only ever set alongside a completed status: any conclusion at all
-                  # forces status=completed server-side, which would report a still-running
-                  # PR as finished.
                   body["conclusion"] = conclusion
-
               try:
-                  _post(f"/repos/{args.repo}/check-runs", token, body)
+                  _post(f"/repos/{repo}/check-runs", token, body)
               except (urllib.error.URLError, OSError, ValueError) as exc:
                   print(f"::error::could not post the gate check run: {exc}", file=sys.stderr)
                   return 2
               return 0
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument("--repo", required=True, help="owner/name")
+              target = parser.add_mutually_exclusive_group(required=True)
+              target.add_argument("--sha", help="head commit SHA")
+              target.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
+              parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
+              args = parser.parse_args(argv)
+              token = os.environ.get("GITHUB_TOKEN", "")
+              if not token:
+                  print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
+                  return 2
+              if not args.reconcile_open:
+                  return report(args.repo, args.sha, token, args.dry_run)
+              page, result = 1, 0
+              try:
+                  while True:
+                      prs = _get(f"/repos/{args.repo}/pulls?state=open&per_page=100&page={page}", token)
+                      if not isinstance(prs, list):
+                          raise ValueError("invalid open PR response")
+                      for pr in prs:
+                          result = max(result, report(args.repo, pr["head"]["sha"], token, args.dry_run))
+                      if len(prs) < 100:
+                          return result
+                      page += 1
+              except (urllib.error.URLError, OSError, ValueError, TypeError, KeyError) as exc:
+                  print(f"::error::could not reconcile open PRs: {exc}", file=sys.stderr)
+                  return 2
 
 
           if __name__ == "__main__":

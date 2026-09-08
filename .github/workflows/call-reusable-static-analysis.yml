@@ -18,6 +18,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+
+permissions:
+  contents: read
+
 jobs:
   semgrep:
     name: semgrep
@@ -52,6 +56,9 @@ jobs:
       - name: Record scan outcome
         if: always()
         run: |
+          if ! jq -e '.results | type == "array"' semgrep-results.json >/dev/null 2>&1; then
+            echo "::warning::Semgrep did not produce valid scan output; inspect install/scan logs."
+          fi
           {
             echo "### Semgrep"
             if [ -f semgrep-results.json ]; then
@@ -69,7 +76,7 @@ jobs:
 
       - name: Upload results artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: semgrep-results
           path: semgrep-results.json
@@ -108,6 +115,9 @@ jobs:
       - name: Record scan outcome
         if: always()
         run: |
+          if ! jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
+            echo "::warning::zizmor did not produce valid scan output; inspect install/scan logs."
+          fi
           {
             echo "### zizmor"
             if [ -f zizmor-results.json ]; then
@@ -125,7 +135,7 @@ jobs:
 
       - name: Upload results artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zizmor-results
           path: |
