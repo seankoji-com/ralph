@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
         state = json.loads(state_path.read_text())
         assert os.getsid(state["pid"]) == state["pid"], "worker did not detach"
         send("\x03")
-        process.wait(timeout=5)
+        wait_for(lambda: process.poll() is not None, "TUI exit after launch")
         assert process.returncode == 0
         wait_for(lambda: json.loads(state_path.read_text())["status"] == "complete", "worker completed after TUI quit")
         wait_for(worker_finished, "worker and guardian released the fixture")
@@ -171,13 +171,19 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
         assert not run("git", "for-each-ref", "--format=%(refname)", "refs/heads/" + state["branch"], cwd=repo).strip()
         assert (repo / "README").read_text() == "preserve my dirty checkout\n"
         send("\x03")
-        process.wait(timeout=5)
+        wait_for(lambda: process.poll() is not None, "TUI exit after deletion")
         assert process.returncode == 0
         print("PASS: reopen → cancel deletion → refuse dirty loop → remove clean loop → empty board, disk and Git refs verified")
     finally:
         if process.poll() is None:
             process.terminate()
-            process.wait(timeout=5)
+            try:
+                # Keep draining the PTY while Bubble Tea flushes its final frame.
+                wait_for(lambda: process.poll() is not None, "TUI cleanup", timeout=5)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
         if state_path and state_path.exists():
             if not worker_finished():
                 (state_path.parent / "ABORT").write_text("smoke fixture cleanup\n")
