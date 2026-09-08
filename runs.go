@@ -24,6 +24,8 @@ type Run struct {
 	Repo           Repo      `json:"repo"`
 	Prompt         string    `json:"prompt"`
 	Model          string    `json:"model"`
+	FallbackModel  string    `json:"fallback_model,omitempty"`
+	ActiveModel    string    `json:"active_model,omitempty"`
 	Runner         string    `json:"runner"`
 	Status         string    `json:"status"`
 	Iteration      int       `json:"iteration"`
@@ -77,7 +79,7 @@ func launchRun(c Config, repo Repo, prompt string, options RunOptions) (Run, err
 	}
 	id := time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(random[:])
 	dir := filepath.Join(c.StateDir, "runs", id)
-	r := Run{ID: id, Repo: repo, Prompt: prompt, Model: options.Model, Runner: runner, Status: "queued", Max: options.Max, Cooldown: options.Cooldown, Timeout: options.Timeout, Started: time.Now(), Updated: time.Now(), Dir: dir, Branch: "codex/ralph-" + id, Worktree: filepath.Join(c.StateDir, "worktrees", id)}
+	r := Run{ID: id, Repo: repo, Prompt: prompt, Model: options.Model, FallbackModel: c.fallbackModel(options.Model), Runner: runner, Status: "queued", Max: options.Max, Cooldown: options.Cooldown, Timeout: options.Timeout, Started: time.Now(), Updated: time.Now(), Dir: dir, Branch: "codex/ralph-" + id, Worktree: filepath.Join(c.StateDir, "worktrees", id)}
 	if err := writeJSON(filepath.Join(dir, "run.json"), r); err != nil {
 		return r, err
 	}
@@ -359,6 +361,7 @@ func worker(dir string) (result error) {
 		}
 		stateMu.Lock()
 		r.Iteration = i
+		r.ActiveModel = r.Model
 		stateMu.Unlock()
 		if err = save("running"); err != nil {
 			return err
@@ -382,14 +385,36 @@ func worker(dir string) (result error) {
 			return err
 		}
 		iterationCtx, iterationCancel := context.WithTimeout(ctx, time.Duration(r.Timeout)*time.Minute)
-		output := &redactingWriter{dst: io.MultiWriter(os.Stdout, f)}
-		args := []string{r.Runner, "run", "--standalone", "--auto", "--model", r.Model, "--", prompt}
+		var captured diagnosticTail
+		output := &redactingWriter{dst: io.MultiWriter(os.Stdout, f, &captured)}
 		env := append(os.Environ(), "RALPH_COMPLETION_TOKEN="+token, fmt.Sprintf("RALPH_ITERATION=%d", i))
-		err = runGuarded(iterationCtx, dir, r.Worktree, args, env, output, &abortRequested)
+		err = runGuarded(iterationCtx, dir, r.Worktree, runnerArgs(r.Runner, r.Model, prompt), env, output, &abortRequested)
+		if err != nil {
+			if flushErr := output.Flush(); flushErr != nil {
+				iterationCancel()
+				f.Close()
+				return flushErr
+			}
+			if canRetryProvider(iterationCtx, r.Model, r.FallbackModel, err, captured.String()) && !stopped() {
+				stateMu.Lock()
+				r.ActiveModel = r.FallbackModel
+				stateMu.Unlock()
+				if err = save("running"); err == nil {
+					_, err = fmt.Fprintf(output, "\nralph: %s unavailable; retrying iteration with %s\n", r.Model, r.FallbackModel)
+				}
+				if err == nil && !stopped() {
+					// A failed primary must not leave a completion signal for its retry.
+					err = os.Remove(completionPath)
+					if err == nil || os.IsNotExist(err) {
+						err = runGuarded(iterationCtx, dir, r.Worktree, runnerArgs(r.Runner, r.FallbackModel, prompt), env, output, &abortRequested)
+					}
+				}
+			}
+		}
 		iterationCancel()
 		flushErr := output.Flush()
 		closeErr := f.Close()
-		if ctx.Err() != nil {
+		if stopped() && (err != nil || ctx.Err() != nil) {
 			return save(stopStatus())
 		}
 		if err != nil {
@@ -431,6 +456,62 @@ func worker(dir string) (result error) {
 	fmt.Println("\nralph: iteration budget reached; review the ledger before continuing.")
 	return save("budget reached")
 }
+
+func runnerArgs(runner, model, prompt string) []string {
+	return []string{runner, "run", "--standalone", "--auto", "--model", model, "--", prompt}
+}
+
+// The timeout is the total iteration budget, including a possible retry.
+func canRetryProvider(ctx context.Context, model, fallback string, err error, output string) bool {
+	return ctx.Err() == nil && fallback != "" && fallback != model && providerUnavailable(err, output)
+}
+
+// Runner text is not a structured error channel. Only inspect its final
+// diagnostic, never arbitrary file contents or earlier tool output.
+func providerUnavailable(err error, output string) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(safeText(output)))
+	if index := strings.LastIndexByte(text, '\n'); index >= 0 {
+		text = strings.TrimSpace(text[index+1:])
+	}
+	if !strings.HasPrefix(text, "error:") && !strings.HasPrefix(text, "request failed:") {
+		return false
+	}
+	for _, marker := range []string{
+		"connection refused", "connection reset", "econnrefused", "econnreset", "enotfound", "etimedout",
+		"no such host", "network error", "failed to connect", "fetch failed",
+		"provider unavailable", "service unavailable", "temporarily unavailable",
+		"http 408", "http 429", "http 500", "http 502", "http 503", "http 504",
+		"429 too many requests", "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// Keep streaming logs intact while bounding memory used for outage detection.
+type diagnosticTail struct{ data []byte }
+
+func (tail *diagnosticTail) Write(p []byte) (int, error) {
+	const limit = 4096
+	n := len(p)
+	if n >= limit {
+		tail.data = append(tail.data[:0], p[n-limit:]...)
+	} else {
+		if extra := len(tail.data) + n - limit; extra > 0 {
+			copy(tail.data, tail.data[extra:])
+			tail.data = tail.data[:len(tail.data)-extra]
+		}
+		tail.data = append(tail.data, p...)
+	}
+	return n, nil
+}
+
+func (tail *diagnosticTail) String() string { return string(tail.data) }
 
 type completionSignal struct {
 	Token     string `json:"token"`

@@ -54,7 +54,7 @@ Click the tabs and coloured action buttons to navigate. Click a run to view its 
 
 Defaults match the existing setup: organisation `seankoji-com`, checkouts in `~/repos`, runner `opencode2`, and `litellm/deepseek-v4-flash` for coding. The prompt partner uses `deepseek-v4-flash` through LiteLLM's OpenAI-compatible API.
 
-Ralph reads the `litellm` provider from the isolated OpenCode2 `opencode.json`, then the main OpenCode `opencode.json` if no provider was found. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
+Ralph reads `litellm` and `devpass` providers from the isolated OpenCode2 `opencode.json`, then the main OpenCode `opencode.json`. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
 
 | Variable | Purpose |
 | --- | --- |
@@ -63,8 +63,11 @@ Ralph reads the `litellm` provider from the isolated OpenCode2 `opencode.json`, 
 | `RALPH_STATE_DIR` | Private state directory; defaults to `$XDG_STATE_HOME/ralph` or `~/.local/state/ralph` |
 | `RALPH_LITELLM_URL` | API base URL, including `/v1` |
 | `RALPH_LITELLM_API_KEY` | API key override; `LITELLM_API_KEY` also works |
+| `DEVPASS_API_KEY` | DevPass key used when LiteLLM is unreachable, rate limited, or returns HTTP 5xx |
+| `RALPH_DEVPASS_URL` | DevPass API base URL; defaults to `https://api.llmgateway.io/v1`; requests require a DevPass key |
 | `RALPH_ASSIST_MODEL` | Prompt partner model |
 | `RALPH_MODEL` | Default coding model, in `provider/model` form |
+| `RALPH_FALLBACK_MODEL` | Explicit runner fallback; otherwise a selected `litellm/...` model maps to `devpass/...` when a DevPass key is configured. Other provider prefixes are not mapped. |
 | `RALPH_RUNNER` | Executable supporting the OpenCode2 command below |
 
 ```sh
@@ -75,6 +78,10 @@ export RALPH_LITELLM_URL='http://nas.careynas.net:4000/v1'
 Only the conversation and selected repo name go to the prompt partner. It has no tools or automatic source access. Org discovery uses paginated GitHub REST requests; local checkouts remain available when GitHub is offline.
 
 Before each workshop reply or draft, Ralph reads the current provider's authenticated `/models` endpoint. For tasks that change code, the prompt partner suggests Open Code Review (OCR) and a reviewer from that live list, preferably a different model family from the selected coding model. It includes the proposed review step in the draft unless you decline. Reviewer selection uses per-run OCR flags and does not change shared OCR defaults. A failed model lookup is disclosed instead of presenting a guessed or stale model as available. `./bin/ralph --models` prints the same live inventory.
+
+The prompt partner retries through DevPass after LiteLLM transport errors, HTTP 408/429, or HTTP 5xx. Model discovery gives the primary 10 seconds when fallback is configured; completions use the caller's remaining 90-second budget. Cancellation or an exhausted budget never starts a fallback request. Failures retain both providers' diagnostics without their response bodies. The workshop discloses that fallback sends the full conversation and labels replies and drafts with the responding provider.
+
+A loop retries once within the current iteration's total timeout, using its selected model's fallback. Stop, abort and an exhausted timeout prevent retry. Detection examines only the final `Error:` or `request failed:` diagnostic in a bounded 4 KiB output tail. Earlier tool output cannot trigger failover, but text is not a structured provider error channel: an indistinguishable final diagnostic can still be misclassified. Unrecognised or multiline errors stop safely for inspection. OpenCode must have the fallback provider configured. Before launch, the app discloses the destination for the full prompt; the board, Details and logs record fallback use.
 
 ## How a loop runs
 

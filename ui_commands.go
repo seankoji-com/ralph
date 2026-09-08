@@ -31,6 +31,7 @@ func (m model) commandItems() []stationCommand {
 	labels := map[string]string{"enter": "Open selected repository", "ctrl+d": "Draft a prompt with Ralph", "ctrl+p": "Review your prompt", "ctrl+l": "Launch this loop", "ctrl+o": "Change loop settings", "n": "Start a new loop", "tab": "Switch output / run details", "f": "Follow live output", "s": "Stop after this iteration", "x": "Stop current agent now", "d": "Remove selected run if clean and merged", "?": "Show keyboard help", "c": "Clone selected repository", "r": "Refresh organisation repositories", "/": "Find a repository", "esc": "Go back"}
 	if m.page == workshop {
 		labels["enter"] = "Send message to Ralph"
+		labels["ctrl+s"] = "Retry interrupted reply"
 	}
 	for _, a := range m.actions() {
 		if a.id == "more" || a.id == "less" {
@@ -157,6 +158,11 @@ func (m model) paletteLayout(base stationLayout) stationLayout {
 	}
 	title := gradient("Commands") + dim.Render(fmt.Sprintf("  %d available", len(items)))
 	popup := panel.BorderForeground(pink).Background(mainBackground).Width(w).Height(h).Render(title + "\n\n" + input.View() + "\n\n" + strings.Join(rows, "\n") + "\n\n" + keyboardHelp("↑/↓ choose   enter run   esc close", w-4))
+	l.content = m.overlaySurface(base.content, popup, x, y)
+	return l
+}
+
+func (m model) overlaySurface(base, popup string, x, y int) string {
 	// Set the background on empty cells too; otherwise underlying output can bleed through.
 	pw, ph := lipgloss.Size(popup)
 	surface := lipgloss.NewCanvas(pw, ph).Compose(lipgloss.NewLayer(popup))
@@ -169,7 +175,7 @@ func (m model) paletteLayout(base stationLayout) stationLayout {
 			}
 		}
 	}
-	backdrop := lipgloss.NewCanvas(m.width, m.height).Compose(lipgloss.NewLayer(base.content))
+	backdrop := lipgloss.NewCanvas(m.width, m.height).Compose(lipgloss.NewLayer(base))
 	fade := func(c color.Color) color.Color {
 		r, g, b, _ := c.RGBA()
 		br, bg, bb, _ := mainBackground.RGBA()
@@ -192,7 +198,5 @@ func (m model) paletteLayout(base stationLayout) stationLayout {
 			backdrop.SetCell(xx, yy, cell)
 		}
 	}
-	l.content = lipgloss.NewCanvas(m.width, m.height).Compose(lipgloss.NewCompositor(lipgloss.NewLayer(backdrop.Render()), lipgloss.NewLayer(surface.Render()).X(x).Y(y))).Render()
-
-	return l
+	return lipgloss.NewCanvas(m.width, m.height).Compose(lipgloss.NewCompositor(lipgloss.NewLayer(backdrop.Render()), lipgloss.NewLayer(surface.Render()).X(x).Y(y))).Render()
 }

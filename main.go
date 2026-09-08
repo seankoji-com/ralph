@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,7 +16,12 @@ import (
 func main() {
 	if len(os.Args) >= 4 && os.Args[1] == "guardian" {
 		if err := guardian(os.Args[2], os.Args[3:]); err != nil {
-			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
+			// Preserve the runner's final diagnostic. The worker records the exit
+			// status; appending it here would hide that diagnostic from failover.
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
+			}
 			os.Exit(1)
 		}
 		return
@@ -77,7 +83,7 @@ func main() {
 	if *checkAI {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		answer, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "Reply with only: Ralph is ready."}}, false)
+		answer, _, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "Reply with only: Ralph is ready."}}, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
 			os.Exit(1)

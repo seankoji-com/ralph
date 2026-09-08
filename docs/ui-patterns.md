@@ -1,5 +1,7 @@
 # UI patterns from Crush
 
+The [8 September catalogue review](design.md) updates this initial direction: quieter chrome, contextual actions, clear reading surfaces and a dedicated removal dialog. The artwork is now reserved for welcome states.
+
 Inspected upstream commit `35a7bcab084a6022717d31b110c538a68d6fadf7` on 7 September 2026. These are original implementations of interaction and layout patterns in Ralph; no Crush code or assets were vendored. The inspected source uses [FSL-1.1-MIT](https://github.com/charmbracelet/crush/blob/35a7bcab084a6022717d31b110c538a68d6fadf7/LICENSE.md).
 
 | Pattern and source | Applied in Ralph |

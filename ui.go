@@ -31,7 +31,7 @@ var (
 	red    = lipgloss.Color("#FF6295")
 	dim    = lipgloss.NewStyle().Foreground(muted)
 	accent = lipgloss.NewStyle().Foreground(purple).Bold(true)
-	panel  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#8655E8")).Padding(0, 1)
+	panel  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#554963")).Padding(0, 1)
 )
 
 type screen int
@@ -54,10 +54,11 @@ type runsMsg struct {
 	log, id string
 }
 type assistantMsg struct {
-	text    string
-	err     error
-	draft   bool
-	request int
+	text     string
+	provider string
+	err      error
+	draft    bool
+	request  int
 }
 type launchedMsg struct {
 	run Run
@@ -72,13 +73,16 @@ type noticeMsg struct {
 	err  error
 }
 type draftState struct {
-	Messages      []Message
-	Input, Prompt string
-	Options       RunOptions
+	Messages       []Message
+	Input, Prompt  string
+	PromptProvider string
+	Options        RunOptions
 }
 
 type model struct {
 	chatContent                                      string
+	workshopError                                    string
+	promptProvider                                   string
 	palette                                          *commandPalette
 	pendingDelete                                    *Run
 	config                                           Config
@@ -206,7 +210,7 @@ func (m *model) resize() {
 		logWidth = m.width - 10
 	}
 	m.logs.SetWidth(max(20, logWidth-1))
-	m.logs.SetHeight(max(3, m.height-17))
+	m.logs.SetHeight(max(3, m.height-19))
 	if m.width < 100 {
 		m.logs.SetHeight(max(1, m.height-22))
 	}
@@ -237,7 +241,11 @@ func (m *model) updateChat() {
 		rail := lipgloss.NewStyle().Border(lipgloss.Border{Left: "▌"}, false, false, false, true).BorderForeground(colour).PaddingLeft(1).Width(min(82, m.chat.Width()))
 		heading := lipgloss.NewStyle().Foreground(colour).Bold(true).Render(name)
 		if msg.Role == "assistant" {
-			heading += "  " + dim.Render(m.config.AssistModel)
+			provider := msg.Provider
+			if provider == "" {
+				provider = "provider not recorded"
+			}
+			heading += "  " + dim.Render(safeText(provider)+" · "+m.config.AssistModel)
 		}
 		b.WriteString(rail.Render(heading+"\n\n"+content) + "\n\n")
 	}
@@ -253,6 +261,10 @@ func (m *model) refreshChat() {
 		rail := lipgloss.NewStyle().Border(lipgloss.Border{Left: "▌"}, false, false, false, true).BorderForeground(pink).PaddingLeft(1).Width(min(82, m.chat.Width()))
 		heading := lipgloss.NewStyle().Foreground(pink).Bold(true).Render("Ralph") + "  " + dim.Render(m.config.AssistModel)
 		content += rail.Render(heading + "\n\n" + m.spin.View() + " Thinking…")
+	}
+	if m.workshopError != "" {
+		content += lipgloss.NewStyle().Border(lipgloss.Border{Left: "▌"}, false, false, false, true).BorderForeground(red).PaddingLeft(1).Width(min(82, m.chat.Width())).Render(
+			lipgloss.NewStyle().Foreground(red).Bold(true).Render("Reply interrupted") + "\n\n" + safeText(m.workshopError) + "\n\nCtrl+S retries. Ctrl+P reviews your text without AI.")
 	}
 	m.chat.SetContent(content)
 	if len(m.messages) == 0 {
@@ -271,7 +283,7 @@ func (m model) saveDraft() error {
 	if m.demo || m.repo.Name == "" || (m.page != workshop && m.page != review) {
 		return nil
 	}
-	d := draftState{Messages: m.messages, Prompt: m.prompt, Options: m.options}
+	d := draftState{Messages: m.messages, Prompt: m.prompt, PromptProvider: m.promptProvider, Options: m.options}
 	if m.page == review {
 		d.Prompt = m.input.Value()
 	} else {
@@ -281,10 +293,12 @@ func (m model) saveDraft() error {
 }
 
 func (m *model) openWorkshop(r Repo) tea.Cmd {
+	m.workshopError = ""
 	m.repo = r
 	m.page = workshop
 	m.messages = nil
 	m.prompt = ""
+	m.promptProvider = ""
 	m.input.Reset()
 	m.notice = ""
 	if !m.demo {
@@ -292,6 +306,7 @@ func (m *model) openWorkshop(r Repo) tea.Cmd {
 		if readJSON(m.draftPath(), &d) == nil {
 			m.messages = d.Messages
 			m.prompt = d.Prompt
+			m.promptProvider = d.PromptProvider
 			if d.Options.validate() == nil {
 				m.options = d.Options
 			}
@@ -320,6 +335,7 @@ func (m *model) ask(draft bool) tea.Cmd {
 		m.notice = "Give Ralph an idea first."
 		return nil
 	}
+	m.workshopError = ""
 	m.updateChat()
 	m.chat.GotoBottom()
 	if err := m.saveDraft(); err != nil {
@@ -346,15 +362,25 @@ func (m *model) ask(draft bool) tea.Cmd {
 	}
 	return func() tea.Msg {
 		defer cancel()
-		s, e := askAssistant(ctx, c, r, h, draft)
-		return assistantMsg{s, e, draft, request}
+		s, provider, e := askAssistant(ctx, c, r, h, draft)
+		return assistantMsg{text: s, provider: provider, err: e, draft: draft, request: request}
 	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	if k, ok := msg.(tea.KeyPressMsg); ok {
-		if k.String() == "ctrl+k" && m.settings == nil {
+		if k.String() == "ctrl+c" {
+			if err := m.saveDraft(); err != nil {
+				m.notice = "Draft save failed: " + err.Error()
+				return m, nil
+			}
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Quit
+		}
+		if k.String() == "ctrl+k" && m.settings == nil && m.pendingDelete == nil {
 			if m.palette != nil {
 				m.palette = nil
 				return m, nil
@@ -382,13 +408,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if k.String() == "esc" {
 				m.settings = nil
 				return m, m.input.Focus()
-			}
-			if k.String() == "ctrl+c" {
-				if err := m.saveDraft(); err != nil {
-					m.notice = err.Error()
-					return m, nil
-				}
-				return m, tea.Quit
 			}
 		}
 		routeToForm := true
@@ -489,6 +508,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.cancel = nil
 		if msg.err != nil {
+			m.workshopError = msg.err.Error()
 			m.refreshChat()
 			m.notice = msg.err.Error() + " · ctrl+s retries, ctrl+p uses your text"
 			return m, nil
@@ -497,12 +517,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.draft {
 			m.refreshChat()
 			m.prompt = msg.text
+			m.promptProvider = msg.provider
 			m.page = review
 			m.input.SetValue(msg.text)
 			m.resize()
 			cmd = m.input.Focus()
 		} else {
-			m.messages = append(m.messages, Message{Role: "assistant", Content: msg.text})
+			m.messages = append(m.messages, Message{Role: "assistant", Content: msg.text, Provider: msg.provider})
 			m.updateChat()
 		}
 		if err := m.saveDraft(); err != nil {
@@ -551,8 +572,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingDelete != nil {
 			r := *m.pendingDelete
 			m.pendingDelete = nil
-			if msg.String() == "y" {
+			if strings.EqualFold(msg.String(), "y") {
 				if m.demo {
+					for i, run := range m.runs {
+						if run.ID == r.ID {
+							m.runs = append(m.runs[:i], m.runs[i+1:]...)
+							break
+						}
+					}
+					m.runIndex = min(m.runIndex, max(0, len(m.runs)-1))
+					m.logs.SetContent("No runs yet.")
+					m.info.SetContent("")
+					if selected, ok := m.selectedRun(); ok {
+						m.logs.SetContent(demoLog)
+						m.info.SetContent(runDetails(selected))
+					}
 					m.notice = "Demo: run removed."
 					return m, nil
 				}
@@ -562,16 +596,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		key := msg.String()
-		if key == "ctrl+c" {
-			if err := m.saveDraft(); err != nil {
-				m.notice = "Draft save failed: " + err.Error()
-				return m, nil
-			}
-			if m.cancel != nil {
-				m.cancel()
-			}
-			return m, tea.Quit
-		}
 		if m.help {
 			if key == "?" || key == "esc" {
 				m.help = false
@@ -628,6 +652,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+p":
 				if m.page == workshop && !m.busy {
 					p := strings.TrimSpace(m.input.Value())
+					if p != "" {
+						m.promptProvider = ""
+					}
 					if p == "" {
 						p = m.prompt
 					}
@@ -931,12 +958,15 @@ func (m model) boardView() string {
 		if r.active() {
 			indicator = m.spin.View() + " "
 		}
-		rows = append(rows, prefix+title+"\n  "+indicator+statusStyle(r.Status).Render(r.Status)+"\n  "+dim.Render(progress))
+		rows = append(rows, prefix+title+"\n  "+indicator+statusStyle(r.Status).Render(r.Status)+dim.Render(fmt.Sprintf("  %d/%d", r.Iteration, r.Max))+"\n  "+dim.Render(clip(runBrief(r, progress), leftWidth-4)))
 	}
 	left := chip(fmt.Sprintf("LOOPS  %02d", len(m.runs)), pink) + "\n\n" + strings.Join(rows, "\n\n")
 	r, _ := m.selectedRun()
 	title := accent.Render(clip(r.Repo.Name, max(24, m.width-55)))
 	meta := statusStyle(r.Status).Render(r.Status) + "  " + meter(r.Iteration, r.Max, 12) + "  " + dim.Render(age(r.Started))
+	if r.ActiveModel != "" && r.ActiveModel != r.Model {
+		meta = lipgloss.NewStyle().Foreground(amber).Render("Fallback · " + safeText(r.ActiveModel))
+	}
 	view := scrolledView(m.logs)
 	if m.details {
 		view = scrolledView(m.info)
@@ -949,11 +979,18 @@ func (m model) boardView() string {
 	if m.details {
 		mode = "RUN DETAILS"
 	}
-	right := title + "\n" + meta + "\n\n" + chip(mode, mint) + "\n" + view
-	if m.width < 100 {
-		return panel.Width(m.width-6).Render(strings.Join(rows, "\n")) + "\n" + mainPanel(right, m.width-6, 0)
+	if !r.active() && !m.details {
+		mode = "SAVED OUTPUT"
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, panel.Width(34).Height(m.height-10).Render(left), " ", mainPanel(right, m.width-37, m.height-10))
+	right := title + "\n" + meta + "\n\n" + chip(mode, mint) + "\n" + view
+	if m.width >= 100 {
+		lineWidth := m.logs.Width()
+		right = title + "\n" + meta + "\n" + lipgloss.NewStyle().Foreground(ink).Render(clip(runBrief(r, "No saved brief"), lineWidth)) + "\n" + statusStyle(r.Status).Render(clip(runOutcome(r), lineWidth)) + "\n\n" + dim.Bold(true).Render(mode) + "\n" + view
+	}
+	if m.width < 100 {
+		return panel.Width(m.width-6).Render(strings.Join(rows, "\n")) + "\n" + panel.Width(m.width-6).Render(right)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, panel.Width(34).Height(m.height-10).Render(left), " ", panel.Width(m.width-37).Height(m.height-10).Render(right))
 }
 
 func (m model) reposView() string {
@@ -980,7 +1017,7 @@ func (m model) reposView() string {
 		}
 		desc := r.Description
 		if desc == "" {
-			desc = "A fresh loop is a good place to start."
+			desc = "No description provided."
 		}
 		rows = append(rows, prefix+name+"  "+chip(badge, mint)+"\n  "+dim.Render(clip(desc, m.width-14)))
 	}
@@ -1026,5 +1063,5 @@ func runDetails(r Run) string {
 	if r.External {
 		return safeText("EXISTING SCRIPT\n\nLatest iteration log\n" + r.LogPath + "\n\nLast write " + age(r.Updated) + "\n\nThis script has no worker heartbeat. Ralph cannot determine whether it is running from its logs alone.\n\nStop it through its scripts/ralph/STOP file.")
 	}
-	return safeText("Run       " + r.ID + "\nState     " + r.Status + "\nModel     " + r.Model + "\nBranch    " + r.Branch + "\nWorktree  " + r.Worktree + "\nLogs      " + r.logPath() + "\n\n" + r.Error + "\n\nPROMPT\n" + r.Prompt)
+	return safeText("Run       " + r.ID + "\nState     " + r.Status + "\nModel     " + r.Model + "\nActive    " + r.ActiveModel + "\nFallback  " + r.FallbackModel + "\nBranch    " + r.Branch + "\nWorktree  " + r.Worktree + "\nLogs      " + r.logPath() + "\n\n" + r.Error + "\n\nPROMPT\n" + r.Prompt)
 }

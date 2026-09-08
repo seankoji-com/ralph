@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,13 +18,81 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if len(os.Args) >= 4 && os.Args[1] == "guardian" {
-		if err := guardian(os.Args[2], os.Args[3:]); err != nil {
-			os.Exit(1)
-		}
+	if os.Getenv("RALPH_E2E_MAIN") == "1" {
+		os.Args = []string{os.Args[0], "--check-ai", "--color=never"}
+		main()
+		os.Exit(0)
+	}
+	if (len(os.Args) >= 4 && os.Args[1] == "guardian") || (len(os.Args) == 3 && os.Args[1] == "worker") {
+		main()
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestE2ECheckAIFallsBackToDevPass(t *testing.T) {
+	litellm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer litellm.Close()
+
+	var devPassRequests int
+	devpass := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		devPassRequests++
+		if r.Header.Get("Authorization") != "Bearer devpass-key" {
+			t.Errorf("DevPass auth = %q", r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/v1/models":
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"}]}`)
+		case "/v1/chat/completions":
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Ralph is ready."}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer devpass.Close()
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config", "opencode")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := fmt.Sprintf(`{"provider":{"litellm":{"options":{"baseURL":%q,"apiKey":"litellm-key"}},"devpass":{"options":{"baseURL":%q,"apiKey":"devpass-key"}}}}`, litellm.URL+"/v1", devpass.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(configDir, "opencode.json"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(withoutEnv(os.Environ(), "RALPH_LITELLM_URL", "RALPH_LITELLM_API_KEY", "LITELLM_API_KEY", "DEVPASS_API_KEY", "RALPH_DEVPASS_URL", "RALPH_MODEL", "RALPH_ASSIST_MODEL", "RALPH_STATE_DIR", "RALPH_FALLBACK_MODEL", "OPENCODE2_ROOT", "XDG_CONFIG_HOME", "RALPH_E2E_MAIN"),
+		"RALPH_E2E_MAIN=1", "RALPH_STATE_DIR="+filepath.Join(root, "state"), "OPENCODE2_ROOT="+root, "XDG_CONFIG_HOME="+filepath.Join(root, "empty"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ralph --check-ai failed: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(string(output)) != "Ralph is ready." || devPassRequests != 2 {
+		t.Fatalf("output=%q DevPass requests=%d", output, devPassRequests)
+	}
+}
+
+func withoutEnv(env []string, keys ...string) []string {
+	clean := make([]string, 0, len(env))
+	for _, entry := range env {
+		keep := true
+		for _, key := range keys {
+			if strings.HasPrefix(entry, key+"=") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			clean = append(clean, entry)
+		}
+	}
+	return clean
 }
 
 func TestAssistantConversation(t *testing.T) {
@@ -52,7 +121,7 @@ func TestAssistantConversation(t *testing.T) {
 	}))
 	defer server.Close()
 	c := Config{BaseURL: server.URL + "/v1/", APIKey: "test-key", AssistModel: "deepseek-v4-flash", Model: "litellm/deepseek-v4-flash"}
-	answer, err := askAssistant(context.Background(), c, Repo{Name: "org/repo"}, []Message{{Role: "user", Content: "Fix search"}, {Role: "assistant", Content: "Which part?"}, {Role: "user", Content: "Keyboard"}}, true)
+	answer, _, err := askAssistant(context.Background(), c, Repo{Name: "org/repo"}, []Message{{Role: "user", Content: "Fix search"}, {Role: "assistant", Content: "Which part?"}, {Role: "user", Content: "Keyboard"}}, true)
 	if err != nil || answer != "Bounded prompt." {
 		t.Fatalf("answer %q, err %v", answer, err)
 	}
@@ -71,16 +140,25 @@ func TestAssistantErrorDoesNotExposeProxyBody(t *testing.T) {
 		fmt.Fprint(w, "secret-should-not-leak")
 	}))
 	defer server.Close()
-	_, err := askAssistant(context.Background(), Config{BaseURL: server.URL, AssistModel: "test"}, Repo{}, nil, false)
+	var fallbackRequests int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackRequests++
+		fmt.Fprint(w, `{"data":[{"id":"test"}]}`)
+	}))
+	defer fallback.Close()
+	_, _, err := askAssistant(context.Background(), Config{BaseURL: server.URL, AssistModel: "test", DevPassURL: fallback.URL, DevPassAPIKey: "fallback-key"}, Repo{}, nil, false)
 	if err == nil || strings.Contains(err.Error(), "secret-should-not-leak") || !strings.Contains(err.Error(), "401") {
 		t.Fatal(err)
+	}
+	if fallbackRequests != 0 {
+		t.Fatalf("authentication failure sent %d requests to DevPass", fallbackRequests)
 	}
 }
 
 func TestAssistantCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := askAssistant(ctx, Config{BaseURL: "http://127.0.0.1:1/v1"}, Repo{}, nil, false)
+	_, _, err := askAssistant(ctx, Config{BaseURL: "http://127.0.0.1:1/v1"}, Repo{}, nil, false)
 	if err == nil {
 		t.Fatal("cancelled request succeeded")
 	}
@@ -203,6 +281,129 @@ func TestWorkerFailureAndBudget(t *testing.T) {
 				t.Fatalf("state=%s", got.Status)
 			}
 		})
+	}
+}
+
+func TestE2EWorkerFallsBackToDevPassWhenLiteLLMIsUnavailable(t *testing.T) {
+	r := fixtureRun(t, `model=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--model" ]; then model=$2; break; fi
+  shift
+done
+printf '%s\n' "$model" >> "__RUN_DIR__/models-used"
+if [ "$model" = "litellm/deepseek-v4-flash" ]; then
+  echo 'request failed: HTTP 503' >&2
+  exit 1
+fi
+printf '{"token":"%s","iteration":%s}' "$RALPH_COMPLETION_TOKEN" "$RALPH_ITERATION" > .ralph-complete.json`, 1)
+	r.Model = "litellm/deepseek-v4-flash"
+	r.FallbackModel = "devpass/deepseek-v4-flash"
+	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker(r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	models, err := os.ReadFile(filepath.Join(r.Dir, "models-used"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Fields(string(models)); strings.Join(got, ",") != r.Model+","+r.FallbackModel {
+		t.Fatalf("models used = %v", got)
+	}
+}
+
+func TestE2EWorkerDoesNotFallbackForAgentFailure(t *testing.T) {
+	r := fixtureRun(t, `printf '%s\n' "$@" >> "__RUN_DIR__/args-used"
+echo 'tests failed' >&2
+exit 1`, 1)
+	r.Model = "litellm/deepseek-v4-flash"
+	r.FallbackModel = "devpass/deepseek-v4-flash"
+	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker(r.Dir); err == nil {
+		t.Fatal("agent failure succeeded")
+	}
+	args, err := os.ReadFile(filepath.Join(r.Dir, "args-used"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(args), r.FallbackModel) {
+		t.Fatalf("ordinary agent failure retried with fallback: %s", args)
+	}
+}
+
+func TestProviderAvailabilityClassification(t *testing.T) {
+	for _, output := range []string{
+		"connection refused", "ECONNRESET", "getaddrinfo ENOTFOUND host", "request ETIMEDOUT",
+		"network error", "fetch failed", "provider unavailable", "temporarily unavailable",
+		"HTTP 408", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504",
+		"429 Too Many Requests", "502 Bad Gateway", "503 Service Unavailable", "504 Gateway Timeout",
+	} {
+		if !providerUnavailable(fmt.Errorf("runner failed"), "Error: "+output) {
+			t.Errorf("availability failure not recognised: %q", output)
+		}
+	}
+	for _, output := range []string{"tests failed", "HTTP 400", "HTTP 401", "HTTP 403", "compile error"} {
+		if providerUnavailable(fmt.Errorf("runner failed"), "Error: "+output) {
+			t.Errorf("ordinary failure classified as provider outage: %q", output)
+		}
+	}
+}
+
+func TestE2EDeleteFinishedLoopDisappearsFromBoardAndDisk(t *testing.T) {
+	r := fixtureRun(t, "echo done", 1)
+	r.Branch = "codex/ralph-" + r.ID
+	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker(r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Dir(filepath.Dir(r.Dir))
+	m := newModel(Config{StateDir: stateDir}, false)
+	m.runs = loadRuns(m.config, []Repo{r.Repo})
+	if len(m.runs) != 1 {
+		t.Fatalf("runs before deletion = %d", len(m.runs))
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	m = updated.(model)
+	if cmd != nil || m.pendingDelete == nil {
+		t.Fatal("delete confirmation was not opened")
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("confirmed deletion did not start")
+	}
+	updated, refresh := m.Update(cmd())
+	m = updated.(model)
+	if refresh == nil {
+		t.Fatal("successful deletion did not refresh the board")
+	}
+	updated, _ = m.Update(refresh())
+	m = updated.(model)
+
+	if len(m.runs) != 0 {
+		t.Fatalf("deleted run remains on board: %+v", m.runs)
+	}
+	for _, path := range []string{r.Dir, r.Worktree} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("deleted path remains: %s", path)
+		}
+	}
+	refs, err := command(context.Background(), r.Repo.Path, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+r.Branch)
+	if err == nil || refs != "" {
+		t.Fatalf("deleted branch remains: %s", r.Branch)
+	}
+	worktrees, err := command(context.Background(), r.Repo.Path, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(worktrees, r.Worktree) {
+		t.Fatalf("deleted worktree remains registered: %s", r.Worktree)
 	}
 }
 

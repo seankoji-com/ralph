@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-	Org, ReposDir, StateDir, Runner, Model string
-	BaseURL, APIKey, AssistModel           string
+	Org, ReposDir, StateDir, Runner, Model   string
+	BaseURL, APIKey, AssistModel             string
+	DevPassURL, DevPassAPIKey, FallbackModel string
 }
 
 func envOr(key, fallback string) string {
@@ -48,16 +49,36 @@ func loadConfig() Config {
 		if err != nil || json.Unmarshal(b, &d) != nil {
 			continue
 		}
-		p, ok := d.Provider["litellm"]
-		if !ok || p.Options.BaseURL == "" {
-			continue
+		if p, ok := d.Provider["litellm"]; ok && p.Options.BaseURL != "" && c.BaseURL == "" {
+			c.BaseURL, c.APIKey = p.Options.BaseURL, resolveSecret(p.Options.APIKey)
 		}
-		c.BaseURL, c.APIKey = p.Options.BaseURL, resolveSecret(p.Options.APIKey)
-		break
+		if p, ok := d.Provider["devpass"]; ok && p.Options.BaseURL != "" && c.DevPassURL == "" {
+			c.DevPassURL, c.DevPassAPIKey = p.Options.BaseURL, resolveSecret(p.Options.APIKey)
+		}
+		if c.BaseURL != "" && c.DevPassURL != "" {
+			break
+		}
 	}
 	c.BaseURL = envOr("RALPH_LITELLM_URL", c.BaseURL)
 	c.APIKey = envOr("RALPH_LITELLM_API_KEY", envOr("LITELLM_API_KEY", c.APIKey))
+	c.DevPassAPIKey = envOr("DEVPASS_API_KEY", c.DevPassAPIKey)
+	c.DevPassURL = envOr("RALPH_DEVPASS_URL", c.DevPassURL)
+	if c.DevPassURL == "" {
+		c.DevPassURL = "https://api.llmgateway.io/v1"
+	}
+	// Keep the explicit override separate from the model selected for each run.
+	c.FallbackModel = os.Getenv("RALPH_FALLBACK_MODEL")
 	return c
+}
+
+func (c Config) fallbackModel(model string) string {
+	if c.FallbackModel != "" {
+		return c.FallbackModel
+	}
+	if c.DevPassAPIKey != "" && strings.HasPrefix(model, "litellm/") && len(model) > len("litellm/") {
+		return "devpass/" + strings.TrimPrefix(model, "litellm/")
+	}
+	return ""
 }
 
 func resolveSecret(s string) string {

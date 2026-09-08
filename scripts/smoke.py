@@ -19,8 +19,13 @@ binary = Path(sys.argv[1] if len(sys.argv) > 1 else "bin/ralph").resolve()
 with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
     root = Path(scratch)
     env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("RALPH_") or key in ("LITELLM_API_KEY", "DEVPASS_API_KEY"):
+            env.pop(key)
     env.update(RALPH_ORG="ralph-fixture", RALPH_REPOS_DIR=str(root / "repos"),
                RALPH_STATE_DIR=str(root / "state"), GIT_CONFIG_GLOBAL=str(root / "gitconfig"),
+               RALPH_MODEL="litellm/smoke", RALPH_FALLBACK_MODEL="devpass/smoke",
+               OPENCODE2_ROOT=str(root / "opencode2"), XDG_CONFIG_HOME=str(root / "config"),
                GIT_CONFIG_NOSYSTEM="1", TERM="xterm-256color", COLORTERM="truecolor")
 
     def run(*args, cwd=root):
@@ -48,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
     gh.write_text('#!/bin/sh\nprintf \'[[{"full_name":"ralph-fixture/example","description":"Detached smoke fixture"}]]\\n\'\n')
     gh.chmod(0o700)
     agent = fakebin / "opencode2"
-    agent.write_text("#!/bin/sh\nset -eu\nsleep 3\nprintf 'Verified fixture work.\\n' > .ralph-ledger.md\nprintf '{\"token\":\"%s\",\"iteration\":%s}' \"$RALPH_COMPLETION_TOKEN\" \"$RALPH_ITERATION\" > .ralph-complete.json\necho COMPLETE\n")
+    agent.write_text("#!/bin/sh\nset -eu\nif [ \"$5\" = 'litellm/smoke' ]; then\n  echo 'Error: HTTP 503' >&2\n  exit 1\nfi\nsleep 8\nprintf 'Verified fixture work.\\n' > .ralph-ledger.md\nprintf '{\"token\":\"%s\",\"iteration\":%s}' \"$RALPH_COMPLETION_TOKEN\" \"$RALPH_ITERATION\" > .ralph-complete.json\necho COMPLETE\n")
     agent.chmod(0o700)
     env["PATH"] = str(fakebin) + os.pathsep + env["PATH"]
     env["RALPH_RUNNER"] = str(agent)
@@ -114,6 +119,8 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
         wait_for(lambda: bool(list((root / "state" / "runs").glob("*/run.json"))), "run record")
         state_path = next((root / "state" / "runs").glob("*/run.json"))
         wait_for(lambda: json.loads(state_path.read_text())["status"] == "running", "worker running")
+        wait_for(lambda: json.loads(state_path.read_text()).get("active_model") == "devpass/smoke", "fallback running")
+        screen("Fallback")
         state = json.loads(state_path.read_text())
         assert os.getsid(state["pid"]) == state["pid"], "worker did not detach"
         send("\x03")
@@ -123,11 +130,49 @@ with tempfile.TemporaryDirectory(prefix="ralph-smoke-") as scratch:
         wait_for(worker_finished, "worker and guardian released the fixture")
         state = json.loads(state_path.read_text())
         assert state["iteration"] == 1
+        assert state["active_model"] == "devpass/smoke"
         assert (Path(state["worktree"]) / ".ralph-ledger.md").read_text() == "Verified fixture work.\n"
         assert (repo / "README").read_text() == "preserve my dirty checkout\n"
         assert "COMPLETE" in (state_path.parent / "output.log").read_text()
-        print("PASS: mouse tabs + Open → command palette → Huh settings → launch → quit TUI → detached completion")
+        print("PASS: mouse tabs + Open → command palette → Huh settings → launch → fallback → quit TUI → detached completion")
         print("PASS: worktree, ledger, output log and original dirty checkout verified")
+
+        # Reopen the built app and exercise deletion against this fixture only.
+        os.close(master)
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 38, 120, 0, 0))
+        process = subprocess.Popen([str(binary), "--color", "always"], stdin=slave, stdout=slave, stderr=slave,
+                                   env=env, cwd=root, start_new_session=True)
+        os.close(slave)
+        output.clear()
+        screen("SAVED OUTPUT")
+        send("d")
+        screen("Remove this loop?")
+        send("\x1b")
+        screen("Removal cancelled.")
+        assert state_path.exists()
+        send("d")
+        screen("Remove this loop?")
+        send("y")
+        screen("worktree contains local files or changes")
+        assert state_path.exists() and Path(state["worktree"]).exists()
+
+        # Remove only the generated fixture ledger so the unchanged, merged
+        # fixture branch becomes eligible for Ralph's guarded deletion.
+        (Path(state["worktree"]) / ".ralph-ledger.md").unlink()
+        send("d")
+        screen("Remove this loop?")
+        send("Y")
+        wait_for(lambda: not state_path.parent.exists(), "run and logs removed")
+        screen("Nothing looping. Yet.")
+        assert not Path(state["worktree"]).exists()
+        assert state["worktree"] not in run("git", "worktree", "list", "--porcelain", cwd=repo)
+        assert not run("git", "for-each-ref", "--format=%(refname)", "refs/heads/" + state["branch"], cwd=repo).strip()
+        assert (repo / "README").read_text() == "preserve my dirty checkout\n"
+        send("\x03")
+        process.wait(timeout=5)
+        assert process.returncode == 0
+        print("PASS: reopen → cancel deletion → refuse dirty loop → remove clean loop → empty board, disk and Git refs verified")
     finally:
         if process.poll() is None:
             process.terminate()
