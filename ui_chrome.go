@@ -14,7 +14,7 @@ var (
 	violet             = lipgloss.Color("#7948ED")
 	mint               = lipgloss.Color("#37E6B5")
 	cyan               = lipgloss.Color("#69DDF4")
-	composerBackground = lipgloss.Color("#36215A")
+	composerBackground = lipgloss.Color("#292336")
 )
 
 func chipStyle(colour color.Color) lipgloss.Style {
@@ -79,7 +79,7 @@ type stationAction struct {
 
 func (m model) actions() []stationAction {
 	if m.pendingDelete != nil {
-		return []stationAction{{"y", "Y  Remove run and logs", red}, {"esc", "Esc  Keep run", mint}}
+		return []stationAction{{"esc", "Esc  Keep loop", mint}, {"y", "Y  Remove loop", red}}
 	}
 	if m.settings != nil {
 		return []stationAction{{"enter", "Enter  Next / save", mint}, {"shift+tab", "Previous", violet}, {"esc", "Esc  Cancel", pink}}
@@ -87,19 +87,43 @@ func (m model) actions() []stationAction {
 	if m.help {
 		return []stationAction{{"esc", "Esc  Close help", pink}}
 	}
+	if m.busy && (m.page == workshop || m.page == review) {
+		return []stationAction{{"esc", "Esc  Cancel request", amber}}
+	}
 	switch m.page {
 	case workshop:
+		if m.workshopError != "" {
+			return []stationAction{{"ctrl+s", "⌃S  Retry", pink}, {"ctrl+p", "⌃P  Use text", mint}, {"esc", "Esc  Back", cyan}}
+		}
 		return []stationAction{{"enter", "Enter  Send", pink}, {"ctrl+d", "⌃D  Draft", violet}, {"ctrl+p", "⌃P  Use text", mint}, {"esc", "Esc  Back", cyan}}
 	case review:
 		return []stationAction{{"ctrl+l", "⌃L  Launch", mint}, {"ctrl+o", "⌃O  Settings", violet}, {"less", "−", cyan}, {"more", "+", cyan}, {"esc", "Esc  Back", pink}}
 	case repositories:
-		return []stationAction{{"enter", "Enter  Open", pink}, {"/", "/  Find", violet}, {"c", "C  Clone", mint}, {"r", "R  Refresh", cyan}, {"esc", "Esc  Loops", violet}}
+		repos := m.filteredRepos()
+		secondary := []stationAction{{"/", "/  Find", violet}, {"r", "R  Refresh", cyan}, {"esc", "Esc  Loops", violet}}
+		if m.busy {
+			return []stationAction{{"?", "?  Help", cyan}}
+		}
+		if m.repoIndex < 0 || m.repoIndex >= len(repos) || repos[m.repoIndex].Archived {
+			return secondary
+		}
+		if repos[m.repoIndex].Path == "" {
+			return append([]stationAction{{"c", "C  Clone", mint}}, secondary...)
+		}
+		return append([]stationAction{{"enter", "Enter  Open", pink}}, secondary...)
 	default:
-		if r, ok := m.selectedRun(); ok && r.Status == "orphaned" {
+		r, ok := m.selectedRun()
+		if !ok {
+			return []stationAction{{"n", "N  New loop", pink}, {"?", "?  Help", cyan}}
+		}
+		if r.External {
+			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"f", "F  Follow", mint}}
+		}
+		if r.Status == "orphaned" {
 			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Recovery details", amber}, {"f", "F  Follow", mint}, {"?", "?  Help", cyan}}
 		}
-		if r, ok := m.selectedRun(); ok && !r.active() && !r.External {
-			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"f", "F  Follow", mint}, {"d", "D  Remove clean run", amber}, {"?", "?  Help", cyan}}
+		if !r.active() {
+			return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"d", "D  Remove run", amber}, {"?", "?  Help", cyan}}
 		}
 		return []stationAction{{"n", "N  New loop", pink}, {"tab", "Tab  Details", violet}, {"f", "F  Follow", mint}, {"s", "S  Stop later", amber}, {"x", "X  Stop now", red}, {"?", "?  Help", cyan}}
 	}
@@ -114,7 +138,7 @@ func (m model) layout() stationLayout {
 		label += " / DEMO"
 	}
 	commands := chip("⌃K  Commands", violet)
-	header := brand + lipgloss.NewStyle().Background(violet).Foreground(ink).Bold(true).Width(width-lipgloss.Width(brand)-lipgloss.Width(commands)).Render(label) + commands
+	header := brand + lipgloss.NewStyle().Foreground(muted).Width(width-lipgloss.Width(brand)-lipgloss.Width(commands)).Render(label) + commands
 	l.add("commands", m.width-1-lipgloss.Width(commands), 0, lipgloss.Width(commands), 1, 0)
 	selected := int(m.page)
 	if m.page == review {
@@ -124,7 +148,7 @@ func (m model) layout() stationLayout {
 	tabs := []string{}
 	x := 1
 	for i, name := range names {
-		colour := violet
+		colour := composerBackground
 		if i == selected {
 			colour = pink
 		}
@@ -171,8 +195,8 @@ func (m model) layout() stationLayout {
 					l.add("run", 3, y, w, 3, i)
 				}
 				if m.width >= 100 {
-					l.add("output", 38, 9, m.logs.Width(), m.logs.Height(), 0)
-					l.add("output-scroll", 38+m.logs.Width(), 9, 1, m.logs.Height(), 0)
+					l.add("output", 38, 11, m.logs.Width(), m.logs.Height(), 0)
+					l.add("output-scroll", 38+m.logs.Width(), 11, 1, m.logs.Height(), 0)
 				} else {
 					l.add("output", 3, 14, m.logs.Width(), m.logs.Height(), 0)
 					l.add("output-scroll", 3+m.logs.Width(), 14, 1, m.logs.Height(), 0)
@@ -190,10 +214,17 @@ func (m model) layout() stationLayout {
 		case workshop:
 			heading := chip("PROMPT WORKSHOP", pink) + " " + lipgloss.NewStyle().Foreground(cyan).Render(clip(m.repo.Name, m.width-33))
 			chat := mainPanel(scrolledView(m.chat), m.workshopWidth(), 0)
+			if len(m.messages) > 0 {
+				chat = panel.Width(m.workshopWidth()).Render(scrolledView(m.chat))
+			}
 			editor := m.composerView()
-			body = heading + "\n" + dim.Render(m.config.AssistModel+" · conversation saved locally") + "\n" + chat + "\n" + editor
+			route := "LiteLLM · conversation saved locally"
+			if len(promptProviders(m.config)) > 1 {
+				route = "LiteLLM → DevPass on outage · sends full conversation"
+			}
+			body = heading + "\n" + dim.Render(clip(route, m.workshopWidth())) + "\n" + chat + "\n" + editor
 			if m.workshopSidebar() {
-				left := heading + "\n" + dim.Render("Talk through the idea. Save a brief. Start a loop.") + "\n" + chat + "\n" + editor
+				left := heading + "\n" + dim.Render(clip(route, m.workshopWidth())) + "\n" + chat + "\n" + editor
 				left = lipgloss.NewStyle().Width(m.workshopWidth()).MaxWidth(m.workshopWidth()).Render(left)
 				body = lipgloss.JoinHorizontal(lipgloss.Top, left, " ", m.workshopContext(lipgloss.Height(left)))
 			}
@@ -213,7 +244,15 @@ func (m model) layout() stationLayout {
 			l.add("input", 3, 7+lipgloss.Height(chat), m.input.Width(), m.input.Height(), 0)
 		case review:
 			editor := m.composerView()
-			body = chip("READY TO RALPH?", mint) + " " + lipgloss.NewStyle().Foreground(cyan).Render(clip(m.repo.Name, m.width-25)) + "\n" + dim.Render("Edit the prompt. Every fresh agent will receive this brief.") + "\n" + editor + "\n" + chip(fmt.Sprintf("%d iterations", m.options.Max), violet) + " " + dim.Render(fmt.Sprintf("%ds rest · %dm per iteration · %s", m.options.Cooldown, m.options.Timeout, m.options.Model)) + "\n" + dim.Render("New worktree from origin's default branch · --auto.") + "\n" + dim.Render("Agent can edit files and run tools. Worktree and logs are kept.")
+			intro := "Edit the prompt. Every fresh agent will receive this brief."
+			if m.promptProvider != "" {
+				intro = "Drafted via " + safeText(m.promptProvider) + ". Edit before launching."
+			}
+			permissions := "Agent can edit files and run tools. Worktree and logs are kept."
+			if fallback := m.config.fallbackModel(m.options.Model); fallback != "" && fallback != m.options.Model {
+				permissions = "Outage retry sends full prompt to " + safeText(fallback)
+			}
+			body = chip("READY TO RALPH?", mint) + " " + lipgloss.NewStyle().Foreground(cyan).Render(clip(m.repo.Name, m.width-25)) + "\n" + dim.Render(clip(intro, m.width-2)) + "\n" + editor + "\n" + chip(fmt.Sprintf("%d iterations", m.options.Max), violet) + " " + dim.Render(fmt.Sprintf("%ds rest · %dm per iteration · %s", m.options.Cooldown, m.options.Timeout, m.options.Model)) + "\n" + dim.Render("New worktree · --auto allows edits and tools.") + "\n" + dim.Render(clip(permissions, m.width-2))
 			l.add("input", 3, 7, m.input.Width(), m.input.Height(), 0)
 		}
 	}
@@ -224,18 +263,28 @@ func (m model) layout() stationLayout {
 			active++
 		}
 	}
-	status := chip(fmt.Sprintf("● %d LOOPING", active), mint)
+	statusText, statusColour := "○ Idle", muted
+	if active > 0 {
+		statusText, statusColour = fmt.Sprintf("● %d active", active), mint
+	}
+	status := lipgloss.NewStyle().Foreground(statusColour).Padding(0, 1).Render(statusText)
 	notice := m.notice
 	if notice == "" {
 		notice = "Ready when you are."
 	}
-	right := chip(clip(m.config.Org, max(8, width/4)), violet)
+	right := dim.Padding(0, 1).Render(clip(m.config.Org, max(8, width/4)))
 	statusWidth := max(1, width-lipgloss.Width(status)-lipgloss.Width(right))
 	status += lipgloss.NewStyle().Background(composerBackground).Foreground(ink).Width(statusWidth).Render(clip(" "+notice, statusWidth)) + right
 	var buttons []string
 	x = 1
-	for _, a := range m.actions() {
-		button := chipStyle(a.colour).Underline(m.hover == a.id).Render(a.label)
+	for i, a := range m.actions() {
+		style := lipgloss.NewStyle().Foreground(muted).Padding(0, 1)
+		if i == 0 {
+			style = chipStyle(a.colour)
+		} else if a.id == "x" || a.id == "d" {
+			style = style.Foreground(a.colour)
+		}
+		button := style.Underline(m.hover == a.id).Render(a.label)
 		w := lipgloss.Width(button)
 		if x+w > m.width-1 {
 			break
@@ -259,6 +308,9 @@ func (m model) layout() stationLayout {
 	}
 	content += "\n" + status + "\n" + strings.Join(buttons, " ") + "\n" + keyboardHelp(hint, width)
 	l.content = lipgloss.NewStyle().Padding(0, 1).MaxWidth(m.width).Foreground(ink).Render(content)
+	if m.pendingDelete != nil {
+		return m.deleteLayout(l)
+	}
 	if m.palette != nil {
 		return m.paletteLayout(l)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,40 @@ func TestProviderModelsUsesCredentialAndDeduplicates(t *testing.T) {
 	ids, err := providerModels(context.Background(), Config{BaseURL: server.URL + "/v1", APIKey: "scoped-key"})
 	if err != nil || !reflect.DeepEqual(ids, []string{"reviewer", "writer"}) {
 		t.Fatalf("models=%v err=%v", ids, err)
+	}
+}
+
+func TestRetryableProviderStatuses(t *testing.T) {
+	for _, status := range []int{408, 429, 500, 502, 503, 504, 599} {
+		if !retryableProviderStatus(status) {
+			t.Errorf("status %d should fall back", status)
+		}
+	}
+	for _, status := range []int{200, 400, 401, 403, 404} {
+		if retryableProviderStatus(status) {
+			t.Errorf("status %d should not fall back", status)
+		}
+	}
+}
+
+func TestHealthyPrimaryResponseSurvivesUntilBodyIsRead(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+		fmt.Fprint(w, "complete response")
+	}))
+	defer server.Close()
+	resp, _, err := providerRequest(context.Background(), Config{FallbackEnabled: true, BaseURL: server.URL, DevPassURL: server.URL, DevPassAPIKey: "fallback"}, http.MethodGet, "models", nil)
+	close(release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "complete response" {
+		t.Fatalf("healthy response lost: %q, %v", body, err)
 	}
 }
 
@@ -56,7 +91,7 @@ func TestAssistantContinuesWhenModelDiscoveryFails(t *testing.T) {
 		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"I can suggest OCR, but could not verify a reviewer model."}}]}`)
 	}))
 	defer server.Close()
-	answer, err := askAssistant(context.Background(), Config{BaseURL: server.URL + "/v1", Model: "litellm/writer"}, Repo{Name: "org/repo"}, []Message{{Role: "user", Content: "Fix the code"}}, false)
+	answer, _, err := askAssistant(context.Background(), Config{BaseURL: server.URL + "/v1", Model: "litellm/writer"}, Repo{Name: "org/repo"}, []Message{{Role: "user", Content: "Fix the code"}}, false)
 	if err != nil || answer == "" || !strings.Contains(system, "discovery was unavailable") || strings.Contains(system, "private-key") {
 		t.Fatalf("answer=%s err=%v", answer, err)
 	}
@@ -73,7 +108,7 @@ func TestLiveReviewerSuggestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "I want Ralph to implement better keyboard navigation and tests in this Go TUI. Suggest a code-review workflow and one reviewer model from our provider, different from the coding model. Keep it brief."}}, false)
+	answer, _, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "I want Ralph to implement better keyboard navigation and tests in this Go TUI. Suggest a code-review workflow and one reviewer model from our provider, different from the coding model. Keep it brief."}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

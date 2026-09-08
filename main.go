@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,7 +16,12 @@ import (
 func main() {
 	if len(os.Args) >= 4 && os.Args[1] == "guardian" {
 		if err := guardian(os.Args[2], os.Args[3:]); err != nil {
-			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
+			// Preserve the runner's final diagnostic. The worker records the exit
+			// status; appending it here would hide that diagnostic from failover.
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
+			}
 			os.Exit(1)
 		}
 		return
@@ -71,13 +77,24 @@ func main() {
 			}
 		}
 		fmt.Printf("LiteLLM endpoint configured: %t\nLiteLLM key configured: %t\n", c.BaseURL != "", c.APIKey != "")
+		fmt.Printf("DevPass fallback opted in: %t\nDevPass destination: %s\nDevPass key configured: %t\n", c.FallbackEnabled, c.fallbackDestination(), c.DevPassAPIKey != "")
+		if fallback := c.fallbackModel(c.Model); fallback != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err := validateRunnerFallback(ctx, c.Runner, "", fallback)
+			cancel()
+			if err != nil {
+				fmt.Printf("INVALID fallback: %s\n", redactCredentials(err.Error()))
+			} else {
+				fmt.Printf("OK fallback model: %s\n", fallback)
+			}
+		}
 		fmt.Printf("Local org repos: %d\n", len(localRepos(c)))
 		return
 	}
 	if *checkAI {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		answer, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "Reply with only: Ralph is ready."}}, false)
+		answer, _, err := askAssistant(ctx, c, Repo{Name: c.Org + "/ralph"}, []Message{{Role: "user", Content: "Reply with only: Ralph is ready."}}, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, redactCredentials(err.Error()))
 			os.Exit(1)

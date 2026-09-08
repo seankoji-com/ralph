@@ -54,7 +54,7 @@ Click the tabs and coloured action buttons to navigate. Click a run to view its 
 
 Defaults match the existing setup: organisation `seankoji-com`, checkouts in `~/repos`, runner `opencode2`, and `litellm/deepseek-v4-flash` for coding. The prompt partner uses `deepseek-v4-flash` through LiteLLM's OpenAI-compatible API.
 
-Ralph reads the `litellm` provider from the isolated OpenCode2 `opencode.json`, then the main OpenCode `opencode.json` if no provider was found. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
+Ralph reads `litellm` and `devpass` providers from the isolated OpenCode2 `opencode.json`, then the main OpenCode `opencode.json`. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
 
 | Variable | Purpose |
 | --- | --- |
@@ -63,8 +63,12 @@ Ralph reads the `litellm` provider from the isolated OpenCode2 `opencode.json`, 
 | `RALPH_STATE_DIR` | Private state directory; defaults to `$XDG_STATE_HOME/ralph` or `~/.local/state/ralph` |
 | `RALPH_LITELLM_URL` | API base URL, including `/v1` |
 | `RALPH_LITELLM_API_KEY` | API key override; `LITELLM_API_KEY` also works |
+| `RALPH_FALLBACK_PROVIDER` | Set `devpass` to opt into fallback. Unset or empty disables fallback even with a key or fallback model configured. |
+| `DEVPASS_API_KEY` | DevPass key; does not enable fallback by itself |
+| `RALPH_DEVPASS_URL` | Explicit DevPass API base URL, or use the OpenCode `devpass` provider URL. No default third-party destination. |
 | `RALPH_ASSIST_MODEL` | Prompt partner model |
 | `RALPH_MODEL` | Default coding model, in `provider/model` form |
+| `RALPH_FALLBACK_MODEL` | Explicit runner fallback after opt-in; otherwise a selected `litellm/...` model maps to `devpass/...` when a DevPass key and URL are configured. Other provider prefixes are not mapped. |
 | `RALPH_RUNNER` | Executable supporting the OpenCode2 command below |
 
 ```sh
@@ -75,6 +79,10 @@ export RALPH_LITELLM_URL='http://nas.careynas.net:4000/v1'
 Only the conversation and selected repo name go to the prompt partner. It has no tools or automatic source access. Org discovery uses paginated GitHub REST requests; local checkouts remain available when GitHub is offline.
 
 Before each workshop reply or draft, Ralph reads the current provider's authenticated `/models` endpoint. For tasks that change code, the prompt partner suggests Open Code Review (OCR) and a reviewer from that live list, preferably a different model family from the selected coding model. It includes the proposed review step in the draft unless you decline. Reviewer selection uses per-run OCR flags and does not change shared OCR defaults. A failed model lookup is disclosed instead of presenting a guessed or stale model as available. `./bin/ralph --models` prints the same live inventory.
+
+After explicit opt-in, the prompt partner retries through DevPass after LiteLLM transport errors, HTTP 408/429, or HTTP 5xx. The primary gets two thirds of the remaining 90-second request budget, reserving time for fallback if it stalls. Model discovery also caps the primary at 10 seconds. Cancellation or an exhausted budget never starts a fallback request. Failures retain both providers' diagnostics without their response bodies. The workshop discloses that fallback sends the full conversation and labels replies and drafts with the responding provider. `--doctor` shows the destination without URL credentials and checks that the runner resolves the fallback model.
+
+A loop retries once within the current iteration's total timeout, only if at least one third of its budget remains. Stop and abort prevent retry; both attempt errors survive if fallback fails. Detection examines the last error diagnostic within eight lines of a bounded 4 KiB output tail, tolerating decorated errors and trailing summaries. Text can still be misclassified; unrecognised failures stop for inspection and log why fallback was skipped. The fixture in `testdata/opencode2-connection-refused.txt` was captured from OpenCode2 v0.0.0-beta-19296 with a dummy key and closed loopback port. Before writing a run record, launch checks the selected fallback against `runner models --standalone` and rejects unresolved routes. This checks runner configuration, not live provider health. The review screen discloses the full-prompt destination; the board, Details and logs record fallback use without hiding run status.
 
 ## How a loop runs
 

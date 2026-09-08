@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,38 +15,115 @@ import (
 	"unicode"
 )
 
-func providerURL(c Config, endpoint string) (string, error) {
-	u, err := url.Parse(c.BaseURL)
+type promptProvider struct {
+	name, baseURL, apiKey string
+}
+
+func promptProviders(c Config) []promptProvider {
+	providers := []promptProvider{{name: "LiteLLM", baseURL: c.BaseURL, apiKey: c.APIKey}}
+	if c.FallbackEnabled && c.DevPassAPIKey != "" && c.DevPassURL != "" {
+		providers = append(providers, promptProvider{name: "DevPass", baseURL: c.DevPassURL, apiKey: c.DevPassAPIKey})
+	}
+	return providers
+}
+
+func endpointURL(baseURL, endpoint string) (string, error) {
+	u, err := url.Parse(baseURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", fmt.Errorf("set RALPH_LITELLM_URL, or configure the litellm provider in OpenCode")
+		return "", fmt.Errorf("invalid provider URL: expected an absolute http(s) URL")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/" + endpoint
 	return u.String(), nil
 }
 
+func providerRequest(ctx context.Context, c Config, method, endpoint string, body []byte) (*http.Response, string, error) {
+	// Bound callers without a deadline, and reserve the final third for fallback.
+	ctx, cancelRequest := context.WithTimeout(ctx, 90*time.Second)
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			cancelRequest()
+		}
+	}()
+	providers := promptProviders(c)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	var failures []error
+	lastProvider := ""
+	for i, provider := range providers {
+		if err := ctx.Err(); err != nil {
+			return nil, lastProvider, errors.Join(append(failures, err)...)
+		}
+		lastProvider = provider.name
+		target, err := endpointURL(provider.baseURL, endpoint)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w; check RALPH_%s_URL or its OpenCode provider", provider.name, err, strings.ToUpper(provider.name)))
+			continue
+		}
+		attemptCtx := ctx
+		cancel := func() {}
+		if i < len(providers)-1 {
+			deadline, _ := ctx.Deadline()
+			budget := time.Until(deadline) * 2 / 3
+			if endpoint == "models" {
+				budget = min(budget, 10*time.Second)
+			}
+			attemptCtx, cancel = context.WithTimeout(ctx, budget)
+		}
+		req, err := http.NewRequestWithContext(attemptCtx, method, target, bytes.NewReader(body))
+		if err != nil {
+			cancel()
+			return nil, provider.name, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if provider.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+provider.apiKey)
+		}
+		response, err := client.Do(req)
+		if err == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+			succeeded = true
+			response.Body = &cancelOnClose{ReadCloser: response.Body, cancel: func() { cancel(); cancelRequest() }}
+			return response, provider.name, nil
+		}
+		cancel()
+		if response != nil {
+			response.Body.Close()
+			failures = append(failures, fmt.Errorf("%s returned HTTP %d", provider.name, response.StatusCode))
+			if !retryableProviderStatus(response.StatusCode) {
+				break
+			}
+		} else {
+			failures = append(failures, fmt.Errorf("%s request failed: %w", provider.name, err))
+		}
+	}
+	return nil, lastProvider, errors.Join(failures...)
+}
+
+// A response's request context must survive until its body has been consumed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (body *cancelOnClose) Close() error {
+	defer body.cancel()
+	return body.ReadCloser.Close()
+}
+
+func retryableProviderStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || (status >= 500 && status < 600)
+}
+
 // Read the models visible to this credential, rather than the local OpenCode menu.
 func providerModels(ctx context.Context, c Config) ([]string, error) {
-	endpoint, err := providerURL(c, "models")
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	if c.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(req)
+	response, provider, err := providerRequest(ctx, c, http.MethodGet, "models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("provider model discovery failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("provider model discovery returned HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("%s model discovery returned HTTP %d", provider, response.StatusCode)
 	}
 	var result struct {
 		Data []struct {
