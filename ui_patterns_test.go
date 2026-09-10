@@ -136,7 +136,7 @@ func TestPatternSnapshots(t *testing.T) {
 		t.Skip("optional visual snapshots")
 	}
 	for _, mode := range []string{"conversation", "commands", "thinking"} {
-		m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4-flash", Model: "litellm/deepseek-v4-flash"}, true)
+		m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4.1-flash", Model: "litellm/deepseek-v4.1-flash"}, true)
 		m.width, m.height = 160, 50
 		m.openWorkshop(m.repos[0])
 		m.messages = []Message{{Role: "user", Content: "Make repository search easier to use. Keep it focused."}, {Role: "assistant", Content: "Let's start with keyboard navigation and clear empty states.\n\n### Proposed scope\n- Match repository names and descriptions.\n- Keep selection visible as results change.\n- Explain how to recover when nothing matches.\n\nRun `go test ./...` after the change. Since Ralph will write code, include an independent OCR review before declaring the loop complete.\n\nShould the filter also include archived repositories?"}}

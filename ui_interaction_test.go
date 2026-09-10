@@ -107,7 +107,7 @@ func TestPointerEditorSelection(t *testing.T) {
 func TestVisibleActionRegions(t *testing.T) {
 	for _, size := range [][2]int{{64, 24}, {80, 30}, {110, 34}, {160, 50}} {
 		for _, page := range []screen{board, repositories, workshop, review} {
-			m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4-flash"}, true)
+			m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4.1-flash"}, true)
 			m.width, m.height = size[0], size[1]
 			m.page = page
 			m.repo = m.repos[0]
@@ -140,7 +140,7 @@ func TestVisualSnapshots(t *testing.T) {
 	}
 	for _, size := range [][2]int{{110, 34}, {160, 50}, {64, 24}} {
 		for _, page := range []screen{board, repositories, workshop, review} {
-			m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4-flash"}, true)
+			m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4.1-flash"}, true)
 			m.width, m.height = size[0], size[1]
 			m.page = page
 			m.repo = m.repos[0]

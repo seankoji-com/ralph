@@ -30,8 +30,8 @@ func loadConfig() Config {
 		ReposDir:    envOr("RALPH_REPOS_DIR", filepath.Join(home, "repos")),
 		StateDir:    envOr("RALPH_STATE_DIR", filepath.Join(envOr("XDG_STATE_HOME", filepath.Join(home, ".local", "state")), "ralph")),
 		Runner:      envOr("RALPH_RUNNER", "opencode2"),
-		Model:       envOr("RALPH_MODEL", "litellm/deepseek-v4-flash"),
-		AssistModel: envOr("RALPH_ASSIST_MODEL", "deepseek-v4-flash"),
+		Model:       envOr("RALPH_MODEL", "litellm/deepseek-v4.1-flash"),
+		AssistModel: envOr("RALPH_ASSIST_MODEL", "deepseek-v4.1-flash"),
 	}
 	// Reuse the existing provider in memory; never copy credentials into run records.
 	paths := []string{

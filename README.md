@@ -52,7 +52,7 @@ Click the tabs and coloured action buttons to navigate. Click a run to view its 
 
 ## Your configuration
 
-Defaults match the existing setup: organisation `seankoji-com`, checkouts in `~/repos`, runner `opencode2`, and `litellm/deepseek-v4-flash` for coding. The prompt partner uses `deepseek-v4-flash` through LiteLLM's OpenAI-compatible API.
+Defaults match the existing setup: organisation `seankoji-com`, checkouts in `~/repos`, runner `opencode2`, and `litellm/deepseek-v4.1-flash` for coding. The prompt partner uses `deepseek-v4.1-flash` through LiteLLM's OpenAI-compatible API.
 
 Ralph reads `litellm` and `devpass` providers from the isolated OpenCode2 `opencode.json`, then the main OpenCode `opencode.json`. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
 

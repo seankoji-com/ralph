@@ -44,7 +44,7 @@ func TestE2ECheckAIFallsBackToDevPass(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/v1/models":
-			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"}]}`)
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4.1-flash"}]}`)
 		case "/v1/chat/completions":
 			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Ralph is ready."}}]}`)
 		default:
@@ -105,7 +105,7 @@ func TestAssistantConversation(t *testing.T) {
 			t.Error("missing provider auth")
 		}
 		if r.URL.Path == "/v1/models" {
-			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"},{"id":"independent-reviewer"}]}`)
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4.1-flash"},{"id":"independent-reviewer"}]}`)
 			return
 		}
 		if r.URL.Path != "/v1/chat/completions" {
@@ -120,7 +120,7 @@ func TestAssistantConversation(t *testing.T) {
 		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Bounded prompt."}}]}`)
 	}))
 	defer server.Close()
-	c := Config{BaseURL: server.URL + "/v1/", APIKey: "test-key", AssistModel: "deepseek-v4-flash", Model: "litellm/deepseek-v4-flash"}
+	c := Config{BaseURL: server.URL + "/v1/", APIKey: "test-key", AssistModel: "deepseek-v4.1-flash", Model: "litellm/deepseek-v4.1-flash"}
 	answer, _, err := askAssistant(context.Background(), c, Repo{Name: "org/repo"}, []Message{{Role: "user", Content: "Fix search"}, {Role: "assistant", Content: "Which part?"}, {Role: "user", Content: "Keyboard"}}, true)
 	if err != nil || answer != "Bounded prompt." {
 		t.Fatalf("answer %q, err %v", answer, err)
@@ -291,13 +291,13 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 printf '%s\n' "$model" >> "__RUN_DIR__/models-used"
-if [ "$model" = "litellm/deepseek-v4-flash" ]; then
+if [ "$model" = "litellm/deepseek-v4.1-flash" ]; then
   echo 'request failed: HTTP 503' >&2
   exit 1
 fi
 printf '{"token":"%s","iteration":%s}' "$RALPH_COMPLETION_TOKEN" "$RALPH_ITERATION" > .ralph-complete.json`, 1)
-	r.Model = "litellm/deepseek-v4-flash"
-	r.FallbackModel = "devpass/deepseek-v4-flash"
+	r.Model = "litellm/deepseek-v4.1-flash"
+	r.FallbackModel = "devpass/deepseek-v4.1-flash"
 	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
 		t.Fatal(err)
 	}
@@ -317,8 +317,8 @@ func TestE2EWorkerDoesNotFallbackForAgentFailure(t *testing.T) {
 	r := fixtureRun(t, `printf '%s\n' "$@" >> "__RUN_DIR__/args-used"
 echo 'tests failed' >&2
 exit 1`, 1)
-	r.Model = "litellm/deepseek-v4-flash"
-	r.FallbackModel = "devpass/deepseek-v4-flash"
+	r.Model = "litellm/deepseek-v4.1-flash"
+	r.FallbackModel = "devpass/deepseek-v4.1-flash"
 	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +491,7 @@ func TestScreenBounds(t *testing.T) {
 	for _, size := range [][2]int{{64, 24}, {80, 30}, {110, 34}, {160, 50}} {
 		for _, page := range []screen{board, repositories, workshop, review} {
 			t.Run(fmt.Sprintf("%dx%d-page%d", size[0], size[1], page), func(t *testing.T) {
-				m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4-flash"}, true)
+				m := newModel(Config{Org: "seankoji-com", AssistModel: "deepseek-v4.1-flash"}, true)
 				m.page = page
 				m.width, m.height = size[0], size[1]
 				m.repo = m.repos[0]
@@ -531,7 +531,7 @@ func TestWorkshopEditingDoesNotTriggerNavigation(t *testing.T) {
 }
 
 func TestSettingsRetainFinalField(t *testing.T) {
-	opts := RunOptions{Max: 7, Cooldown: 9, Timeout: 42, Model: "litellm/deepseek-v4-flash"}
+	opts := RunOptions{Max: 7, Cooldown: 9, Timeout: 42, Model: "litellm/deepseek-v4.1-flash"}
 	f := settingsForm(opts, 90)
 	if got := optionsFromForm(f); got != opts {
 		t.Fatalf("unvisited field values lost: %+v", got)

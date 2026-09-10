@@ -1030,7 +1030,7 @@ func (m model) reposView() string {
 func demoData() ([]Repo, []Run) {
 	repos := []Repo{{Name: "seankoji-com/zooma", Description: "A better way to buy and sell cars.", Path: "/demo/zooma"}, {Name: "seankoji-com/ralph", Description: "Small loops. Big ideas.", Path: "/demo/ralph"}, {Name: "seankoji-com/careynas.net", Description: "A homelab with a little too much ambition.", Path: "/demo/careynas.net"}, {Name: "seankoji-com/frugalbar", Description: "Keep an eye on what your AI is spending."}}
 	now := time.Now()
-	runs := []Run{{ID: "demo-search", Repo: repos[0], Status: "running", Iteration: 3, Max: 8, Started: now.Add(-12 * time.Minute), Model: "litellm/deepseek-v4-flash", Prompt: "Improve search keyboard navigation and test the complete flow.", Worktree: "~/.local/state/ralph/runs/demo-search/worktree", Branch: "codex/ralph-demo-search"}, {ID: "demo-docs", Repo: repos[2], Status: "cooldown", Iteration: 2, Max: 5, Started: now.Add(-25 * time.Minute)}, {ID: "demo-tests", Repo: repos[1], Status: "complete", Iteration: 4, Max: 6, Started: now.Add(-90 * time.Minute)}}
+	runs := []Run{{ID: "demo-search", Repo: repos[0], Status: "running", Iteration: 3, Max: 8, Started: now.Add(-12 * time.Minute), Model: "litellm/deepseek-v4.1-flash", Prompt: "Improve search keyboard navigation and test the complete flow.", Worktree: "~/.local/state/ralph/runs/demo-search/worktree", Branch: "codex/ralph-demo-search"}, {ID: "demo-docs", Repo: repos[2], Status: "cooldown", Iteration: 2, Max: 5, Started: now.Add(-25 * time.Minute)}, {ID: "demo-tests", Repo: repos[1], Status: "complete", Iteration: 4, Max: 6, Started: now.Add(-90 * time.Minute)}}
 	return repos, runs
 }
 
