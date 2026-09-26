@@ -34,11 +34,7 @@ func loadConfig() Config {
 		AssistModel: envOr("RALPH_ASSIST_MODEL", "deepseek-v4.1-flash"),
 	}
 	// Reuse the existing provider in memory; never copy credentials into run records.
-	paths := []string{
-		filepath.Join(envOr("OPENCODE2_ROOT", filepath.Join(home, ".local/share/opencode2")), "config/opencode/opencode.json"),
-		filepath.Join(envOr("XDG_CONFIG_HOME", filepath.Join(home, ".config")), "opencode/opencode.json"),
-	}
-	for _, path := range paths {
+	for _, path := range opencodeConfigPaths() {
 		var d struct {
 			Provider map[string]struct {
 				Options struct {
@@ -68,7 +64,17 @@ func loadConfig() Config {
 	c.FallbackEnabled = os.Getenv("RALPH_FALLBACK_PROVIDER") == "devpass"
 	// Keep the explicit override separate from the model selected for each run.
 	c.FallbackModel = os.Getenv("RALPH_FALLBACK_MODEL")
+	registerSecrets(c.APIKey, c.DevPassAPIKey)
 	return c
+}
+
+// opencodeConfigPaths lists the isolated OpenCode2 config, then the main one.
+func opencodeConfigPaths() []string {
+	home, _ := os.UserHomeDir()
+	return []string{
+		filepath.Join(envOr("OPENCODE2_ROOT", filepath.Join(home, ".local/share/opencode2")), "config/opencode/opencode.json"),
+		filepath.Join(envOr("XDG_CONFIG_HOME", filepath.Join(home, ".config")), "opencode/opencode.json"),
+	}
 }
 
 func (c Config) fallbackModel(model string) string {

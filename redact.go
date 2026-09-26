@@ -4,12 +4,77 @@ import (
 	"bytes"
 	"io"
 	"regexp"
+	"slices"
+	"sync"
 )
 
-var urlCredentials = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+@`)
+var (
+	urlCredentials = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+@`)
+	bearerToken    = regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+`)
+	// bearerPrefix also matches a token still arriving, so streaming can hold it back.
+	bearerPrefix = regexp.MustCompile(`(?i)\bbearer\s*[A-Za-z0-9._~+/=-]*`)
+	secretsMu    sync.RWMutex
+	secrets      [][]byte
+)
+
+// registerSecrets adds configured key values to every later redaction. Short
+// values are ignored so ordinary words are never masked.
+func registerSecrets(values ...string) {
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	for _, v := range values {
+		if len(v) >= 8 && !slices.ContainsFunc(secrets, func(s []byte) bool { return string(s) == v }) {
+			secrets = append(secrets, []byte(v))
+		}
+	}
+}
+
+func maskSecrets(b []byte) []byte {
+	b = bearerToken.ReplaceAll(b, []byte("${1}[redacted]"))
+	secretsMu.RLock()
+	defer secretsMu.RUnlock()
+	for _, secret := range secrets {
+		b = bytes.ReplaceAll(b, secret, []byte("[redacted]"))
+	}
+	return b
+}
+
+// plainCut returns how much of p can be written now without splitting a
+// secret, a bearer token or a "://" that may continue in the next write.
+func plainCut(p []byte) int {
+	hold := 5 // len("bearer") - 1, which also covers a split "://"
+	secretsMu.RLock()
+	var spans [][]int
+	for _, secret := range secrets {
+		hold = max(hold, len(secret)-1)
+		for i := 0; ; {
+			j := bytes.Index(p[i:], secret)
+			if j < 0 {
+				break
+			}
+			spans = append(spans, []int{i + j, i + j + len(secret)})
+			i += j + 1
+		}
+	}
+	secretsMu.RUnlock()
+	spans = append(spans, bearerPrefix.FindAllIndex(p, -1)...)
+	cut := max(0, len(p)-hold)
+	for moved := true; moved; {
+		moved = false
+		for _, span := range spans {
+			if span[0] < cut && span[1] >= cut {
+				cut, moved = span[0], true
+			}
+		}
+	}
+	if cut == 0 && len(p) > 64*1024 {
+		return len(p) // never buffer an endless token; maskSecrets still hides its head
+	}
+	return cut
+}
 
 func redactCredentials(s string) string {
-	return urlCredentials.ReplaceAllString(s, "${1}[redacted]@")
+	return string(maskSecrets([]byte(urlCredentials.ReplaceAllString(s, "${1}[redacted]@"))))
 }
 
 // Stream ordinary output immediately. Hold only a possible URL authority until
@@ -37,7 +102,7 @@ func (w *redactingWriter) Write(p []byte) (int, error) {
 func (w *redactingWriter) Flush() error { return w.drain(true) }
 
 func (w *redactingWriter) drain(final bool) error {
-	write := func(b []byte) error { _, err := w.dst.Write(b); return err }
+	write := func(b []byte) error { _, err := w.dst.Write(maskSecrets(b)); return err }
 	for len(w.pending) > 0 {
 		if w.authority {
 			end := bytes.IndexAny(w.pending, " /@\t\r\n")
@@ -91,8 +156,8 @@ func (w *redactingWriter) drain(final bool) error {
 		}
 		count := len(w.pending)
 		if !final {
-			count = max(0, count-2)
-		} // a split :// may begin in the last two bytes
+			count = plainCut(w.pending)
+		}
 		if err := write(w.pending[:count]); err != nil {
 			return err
 		}

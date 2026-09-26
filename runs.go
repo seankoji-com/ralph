@@ -364,6 +364,7 @@ func worker(dir string) (result error) {
 		return err
 	}
 	fmt.Printf("ralph: worktree %s\n", r.Worktree)
+	requiredEnv := runnerEnvNames()
 	for i := 1; i <= r.Max; i++ {
 		if stopped() {
 			return save(stopStatus())
@@ -396,7 +397,7 @@ func worker(dir string) (result error) {
 		iterationCtx, iterationCancel := context.WithTimeout(ctx, time.Duration(r.Timeout)*time.Minute)
 		var captured diagnosticTail
 		output := &redactingWriter{dst: io.MultiWriter(os.Stdout, f, &captured)}
-		env := append(os.Environ(), "RALPH_COMPLETION_TOKEN="+token, fmt.Sprintf("RALPH_ITERATION=%d", i))
+		env := append(agentEnv(os.Environ(), requiredEnv), "RALPH_COMPLETION_TOKEN="+token, fmt.Sprintf("RALPH_ITERATION=%d", i))
 		err = runGuarded(iterationCtx, dir, r.Worktree, runnerArgs(r.Runner, r.Model, prompt), env, output, &abortRequested)
 		if err != nil {
 			if flushErr := output.Flush(); flushErr != nil {
@@ -412,15 +413,21 @@ func worker(dir string) (result error) {
 				if err = save("running"); err == nil {
 					_, err = fmt.Fprintf(output, "\nralph: %s unavailable; retrying iteration with %s\n", r.Model, r.FallbackModel)
 				}
-				if err == nil && !stopped() {
-					// A failed primary must not leave a completion signal for its retry.
-					err = os.Remove(completionPath)
-					if err == nil || os.IsNotExist(err) {
-						err = runGuarded(iterationCtx, dir, r.Worktree, runnerArgs(r.Runner, r.FallbackModel, prompt), env, output, &abortRequested)
+				beforeFallback()
+				if err == nil && stopped() {
+					// Stop won the race: keep the primary failure so its completion file is never read.
+					err = primaryErr
+				} else {
+					if err == nil {
+						// A failed primary must not leave a completion signal for its retry.
+						err = os.Remove(completionPath)
+						if err == nil || os.IsNotExist(err) {
+							err = runGuarded(iterationCtx, dir, r.Worktree, runnerArgs(r.Runner, r.FallbackModel, prompt), env, output, &abortRequested)
+						}
 					}
-				}
-				if err != nil {
-					err = errors.Join(primaryErr, fmt.Errorf("%s: %w", r.FallbackModel, err))
+					if err != nil {
+						err = errors.Join(primaryErr, fmt.Errorf("%s: %w", r.FallbackModel, err))
+					}
 				}
 			} else if r.FallbackModel != "" {
 				_, _ = fmt.Fprintln(output, "ralph: fallback skipped (unrecognised outage, insufficient time, or stop requested); diagnostic:", lastDiagnostic(captured.String()))
@@ -472,6 +479,9 @@ func worker(dir string) (result error) {
 	fmt.Println("\nralph: iteration budget reached; review the ledger before continuing.")
 	return save("budget reached")
 }
+
+// beforeFallback lets tests land a stop request after the retry decision.
+var beforeFallback = func() {}
 
 func runnerArgs(runner, model, prompt string) []string {
 	return []string{runner, "run", "--standalone", "--auto", "--model", model, "--", prompt}
