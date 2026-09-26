@@ -70,9 +70,10 @@ Ralph reads `litellm` and `devpass` providers from the isolated OpenCode2 `openc
 | `RALPH_MODEL` | Default coding model, in `provider/model` form |
 | `RALPH_FALLBACK_MODEL` | Explicit runner fallback after opt-in; otherwise a selected `litellm/...` model maps to `devpass/...` when a DevPass key and URL are configured. Other provider prefixes are not mapped. |
 | `RALPH_RUNNER` | Executable supporting the OpenCode2 command below |
+| `RALPH_AGENT_ENV` | Comma-separated extra variable names passed to the agent; see [How a loop runs](#how-a-loop-runs) |
 
 ```sh
-export RALPH_LITELLM_URL='http://nas.careynas.net:4000/v1'
+export RALPH_LITELLM_URL='http://litellm.example.internal:4000/v1'
 ./bin/ralph --check-ai
 ```
 
@@ -95,6 +96,8 @@ opencode2 run --standalone --auto --model <model> -- <prompt>
 A guardian launches each agent, holds an independent run lock, and watches an anonymous pipe owned by the worker. If the worker dies, including from SIGKILL, the pipe closes and the guardian stops the agent. `agent.json` records the agent process group; cleanup checks both the lease and group liveness. If both supervisors are force-killed, a surviving agent is shown as orphaned and cleanup stays blocked. Historical group IDs are never used to send signals because they may have been reused. Inspect that record before manual recovery.
 
 The agent has its normal configured tool permissions. `--auto` runs unattended. A worktree isolates file edits; it is not a security sandbox or a limit on external tool actions.
+
+Agents get a filtered environment: `PATH`, `HOME`, user, shell, temp, terminal and locale variables, XDG directories, `SSH_AUTH_SOCK`, git identity, proxy and CA variables, `OPENCODE*`, plus any variable the OpenCode configs above reference as `{env:NAME}`. Ralph's own keys (`RALPH_LITELLM_API_KEY`, `LITELLM_API_KEY`, `DEVPASS_API_KEY`) and other ambient secrets are withheld unless the runner config references them. List anything else the runner needs in `RALPH_AGENT_ENV`. Logs mask configured key values, `Bearer` tokens and URL credentials.
 
 Ralph asks the agent to carry progress in `.ralph-ledger.md`. It does not reset or rebase between iterations, so unfinished changes stay available. Dependencies are the agent's responsibility according to each repo's instructions. The original checkout is left alone.
 
