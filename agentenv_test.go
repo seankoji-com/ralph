@@ -55,3 +55,22 @@ func TestE2EAgentDoesNotInheritRalphCredentials(t *testing.T) {
 		t.Fatalf("agent env: %s", env)
 	}
 }
+
+func TestE2EWorkerMasksConfiguredKeysInLogs(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE2_ROOT", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "empty"))
+	t.Setenv("RALPH_LITELLM_API_KEY", "fixture-worker-log-key")
+	t.Setenv("RALPH_AGENT_ENV", "RALPH_LITELLM_API_KEY")
+	r := fixtureRun(t, `echo "leak $RALPH_LITELLM_API_KEY end"`, 1)
+	if err := worker(r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(r.Dir, "iteration-01.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if log := string(data); strings.Contains(log, "fixture-worker-log-key") || !strings.Contains(log, "leak [redacted] end") {
+		t.Fatalf("iteration log: %s", log)
+	}
+}

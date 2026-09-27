@@ -241,6 +241,9 @@ func worker(dir string) (result error) {
 		return err
 	}
 	r.Dir = dir
+	// The worker is its own process: register configured keys here so the
+	// iteration logs mask them, not only the TUI process.
+	loadConfig()
 	// A lock prevents accidentally starting a second worker for the same record.
 	lock, err := os.OpenFile(filepath.Join(dir, "worker.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
