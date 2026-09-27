@@ -411,3 +411,35 @@ echo 'Fallback ran without claiming completion'`, 1)
 		t.Fatalf("missing retry log: %s, %v", log, err)
 	}
 }
+
+func TestE2EStopAfterRetryDecisionKeepsPrimaryFailure(t *testing.T) {
+	// The primary claims completion, then fails; STOP lands after the retry decision.
+	r := fixtureRun(t, `echo "$5" >> "__RUN_DIR__/attempts"
+printf '{"token":"%s","iteration":%s}' "$RALPH_COMPLETION_TOKEN" "$RALPH_ITERATION" > .ralph-complete.json
+echo 'Error: HTTP 503' >&2
+exit 1`, 1)
+	r.FallbackModel = "devpass/model"
+	if err := writeJSON(filepath.Join(r.Dir, "run.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	beforeFallback = func() {
+		if err := os.WriteFile(filepath.Join(r.Dir, "STOP"), nil, 0600); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { beforeFallback = func() {} })
+	if err := worker(r.Dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(r.Dir, "attempts"))
+	if err != nil || string(data) != "fake/test\n" {
+		t.Fatalf("fallback ran after STOP: %q, %v", data, err)
+	}
+	var got Run
+	if err := readJSON(filepath.Join(r.Dir, "run.json"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("failed primary recorded as %s", got.Status)
+	}
+}
