@@ -47,7 +47,9 @@ func TestSlowHealthyCompletionDoesNotFallBack(t *testing.T) {
 func TestProviderFailuresRetainBothCauses(t *testing.T) {
 	for _, status := range []int{401, 502} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "primary-secret", 503) }))
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "primary-secret", http.StatusServiceUnavailable)
+			}))
 			defer primary.Close()
 			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "fallback-secret", status) }))
 			defer fallback.Close()

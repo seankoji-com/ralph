@@ -6,7 +6,7 @@ Built with [Charm](https://charm.land/libs/): Bubble Tea v2, Bubbles, Lip Gloss,
 
 ## Run it
 
-Requires Go 1.25.8 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and your existing `opencode2` installation. macOS and Linux are supported; detached workers use Unix process groups.
+Requires Go 1.26.0 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and your existing `opencode2` installation. macOS and Linux are supported; detached workers use Unix process groups.
 
 ```sh
 go build -o bin/ralph .
