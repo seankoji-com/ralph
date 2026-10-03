@@ -1,0 +1,31 @@
+# golangci-lint v2 configuration (org convention; see seankoji-com/crabbie).
+#
+# gosimple is not listed: v2 folded it into staticcheck, and naming it is a
+# hard config error.
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  exclusions:
+    rules:
+      # Best-effort cleanup and output calls whose failure has no useful
+      # recovery here: closing files/response bodies after the data was already
+      # read or synced (the write paths sync and check Close explicitly),
+      # releasing a flock held by a process that is about to exit, removing a
+      # temp file, killing a test child, and writing to stdout or an httptest
+      # response. Everything else, including every Write/Sync/Rename, stays
+      # checked.
+      - linters: [errcheck]
+        text: 'Error return value of .*\b(Close|Flock|Remove|Kill|Fprint|Fprintln)\b.* is not checked'
+
+issues:
+  # Report everything. A cap that silently hides the third instance of a
+  # problem is worse than no linter, because it reads as clean.
+  max-issues-per-linter: 0
+  max-same-issues: 0

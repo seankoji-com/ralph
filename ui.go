@@ -860,9 +860,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	if m.page == workshop || m.page == review {
+	switch m.page {
+	case workshop, review:
 		m.input, cmd = m.input.Update(msg)
-	} else if m.page == board {
+	case board:
 		m.logs, cmd = m.logs.Update(msg)
 	}
 	return m, cmd

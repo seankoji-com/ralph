@@ -22,9 +22,13 @@ type Repo struct {
 
 var repoNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-]$`)
 
+// command runs a child process non-interactively. Workers are detached with
+// Setsid and have no controlling terminal, so a git credential prompt or a gh
+// prompt would block forever instead of failing.
 func command(ctx context.Context, dir, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s: %w: %s", name, err, redactCredentials(strings.TrimSpace(string(b))))
