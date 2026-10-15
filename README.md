@@ -4,6 +4,18 @@ A terminal home for your coding loops. Pick a repo, work out a prompt with DeepS
 
 Built with [Charm](https://charm.land/libs/): Bubble Tea v2, Bubbles, Lip Gloss, Glamour and Huh. Violet panels, mint progress bars, Markdown conversations, keyboard controls and a small robot who wants you to take a coffee break.
 
+```mermaid
+flowchart LR
+    A["Pick a repo"] --> B["Shape the prompt<br/>talk it through first"]
+    B --> C["Review settings<br/>model, passes, timeout"]
+    C --> D["Run the loop<br/>own Git worktree per run"]
+    D --> E["Watch or walk away<br/>workers keep running"]
+    E --> F["Keep, stop or remove<br/>merged work only"]
+    D -.->|"another pass"| D
+```
+
+Each loop runs in its own Git worktree, so closing the terminal never strands work and removing a finished run never deletes an unmerged branch.
+
 ## Run it
 
 Requires Go 1.26.0 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and your existing `opencode2` installation. macOS and Linux are supported; detached workers use Unix process groups.
