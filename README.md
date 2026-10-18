@@ -18,7 +18,7 @@ Each loop runs in its own Git worktree, so closing the terminal never strands wo
 
 ## Run it
 
-Requires Go 1.26.0 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and your existing `opencode2` installation. macOS and Linux are supported; detached workers use Unix process groups.
+Requires Go 1.26.0 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and [OpenCode](https://opencode.ai) on your `PATH` as `opencode`. Ralph calls `opencode run --standalone --auto` and `opencode models --standalone`; both were checked against OpenCode 2.0.32. If your OpenCode binary has another name or path, set `RALPH_RUNNER` to it. macOS and Linux are supported; detached workers use Unix process groups.
 
 ```sh
 go build -o bin/ralph .
@@ -64,9 +64,19 @@ Click the tabs and coloured action buttons to navigate. Click a run to view its 
 
 ## Your configuration
 
-Defaults match the existing setup: organisation `seankoji-com`, checkouts in `~/repos`, runner `opencode2`, and `litellm/deepseek-v4.1-flash` for coding. The prompt partner uses `deepseek-v4.1-flash` through LiteLLM's OpenAI-compatible API.
+Defaults match the author's setup: organisation `seankoji-com`, checkouts in `~/repos`, runner `opencode`, and `litellm/deepseek-v4.1-flash` for coding. The prompt partner uses `deepseek-v4.1-flash` through LiteLLM's OpenAI-compatible API.
 
-Ralph reads `litellm` and `devpass` providers from the isolated OpenCode2 `opencode.json`, then the main OpenCode `opencode.json`. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
+On your own machine, set at least these, then run `./bin/ralph --doctor`:
+
+```sh
+export RALPH_ORG=your-github-org              # an organisation; user accounts are not listed
+export RALPH_MODEL=provider/model             # any model `opencode models` lists
+export RALPH_LITELLM_URL=https://host/v1      # OpenAI-compatible endpoint for the prompt partner
+export RALPH_LITELLM_API_KEY=...
+export RALPH_ASSIST_MODEL=model-id            # a model that endpoint serves
+```
+
+Ralph reads `litellm` and `devpass` providers from an optional isolated OpenCode root (`$OPENCODE2_ROOT/config/opencode/opencode.json`, default `~/.local/share/opencode2`), then the main OpenCode `opencode.json`. It supports literal keys, `{env:NAME}` and `{file:path}`. Credentials stay in memory and are never copied into run records. JSONC files are not parsed; use environment overrides for those configurations.
 
 | Variable | Purpose |
 | --- | --- |
@@ -81,7 +91,7 @@ Ralph reads `litellm` and `devpass` providers from the isolated OpenCode2 `openc
 | `RALPH_ASSIST_MODEL` | Prompt partner model |
 | `RALPH_MODEL` | Default coding model, in `provider/model` form |
 | `RALPH_FALLBACK_MODEL` | Explicit runner fallback after opt-in; otherwise a selected `litellm/...` model maps to `devpass/...` when a DevPass key and URL are configured. Other provider prefixes are not mapped. |
-| `RALPH_RUNNER` | Executable supporting the OpenCode2 command below |
+| `RALPH_RUNNER` | OpenCode executable to run; defaults to `opencode` on `PATH`. Must support the command below |
 | `RALPH_AGENT_ENV` | Comma-separated extra variable names passed to the agent; see [How a loop runs](#how-a-loop-runs) |
 
 ```sh
@@ -95,14 +105,14 @@ Before each workshop reply or draft, Ralph reads the current provider's authenti
 
 After explicit opt-in, the prompt partner retries through DevPass after LiteLLM transport errors, HTTP 408/429, or HTTP 5xx. The primary gets two thirds of the remaining 90-second request budget, reserving time for fallback if it stalls. Model discovery also caps the primary at 10 seconds. Cancellation or an exhausted budget never starts a fallback request. Failures retain both providers' diagnostics without their response bodies. The workshop discloses that fallback sends the full conversation and labels replies and drafts with the responding provider. `--doctor` shows the destination without URL credentials and checks that the runner resolves the fallback model.
 
-A loop retries once within the current iteration's total timeout, only if at least one third of its budget remains. Stop and abort prevent retry; both attempt errors survive if fallback fails. Detection examines the last error diagnostic within eight lines of a bounded 4 KiB output tail, tolerating decorated errors and trailing summaries. Text can still be misclassified; unrecognised failures stop for inspection and log why fallback was skipped. The fixture in `testdata/opencode2-connection-refused.txt` was captured from OpenCode2 v0.0.0-beta-19296 with a dummy key and closed loopback port. Before writing a run record, launch checks the selected fallback against `runner models --standalone` and rejects unresolved routes. This checks runner configuration, not live provider health. The review screen discloses the full-prompt destination; the board, Details and logs record fallback use without hiding run status.
+A loop retries once within the current iteration's total timeout, only if at least one third of its budget remains. Stop and abort prevent retry; both attempt errors survive if fallback fails. Detection examines the last error diagnostic within eight lines of a bounded 4 KiB output tail, tolerating decorated errors and trailing summaries. Text can still be misclassified; unrecognised failures stop for inspection and log why fallback was skipped. The fixture in `testdata/opencode2-connection-refused.txt` was captured from an OpenCode 2 pre-release build (v0.0.0-beta-19296) with a dummy key and closed loopback port. Before writing a run record, launch checks the selected fallback against `runner models --standalone` and rejects unresolved routes. This checks runner configuration, not live provider health. The review screen discloses the full-prompt destination; the board, Details and logs record fallback use without hiding run status.
 
 ## How a loop runs
 
 Launch fetches `origin` and creates a dedicated worktree from its default branch on `codex/ralph-<run-id>`. Every iteration starts a new process:
 
 ```text
-opencode2 run --standalone --auto --model <model> -- <prompt>
+opencode run --standalone --auto --model <model> -- <prompt>
 ```
 
 A guardian launches each agent, holds an independent run lock, and watches an anonymous pipe owned by the worker. If the worker dies, including from SIGKILL, the pipe closes and the guardian stops the agent. `agent.json` records the agent process group; cleanup checks both the lease and group liveness. If both supervisors are force-killed, a surviving agent is shown as orphaned and cleanup stays blocked. Historical group IDs are never used to send signals because they may have been reused. Inspect that record before manual recovery.

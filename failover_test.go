@@ -445,3 +445,17 @@ exit 1`, 1)
 		t.Fatalf("failed primary recorded as %s", got.Status)
 	}
 }
+
+func TestRunnerDefaultsToOpenCodeAndHonoursOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCODE2_ROOT", root)
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("RALPH_RUNNER", "")
+	if c := loadConfig(); c.Runner != "opencode" {
+		t.Fatalf("default runner %q, want opencode", c.Runner)
+	}
+	t.Setenv("RALPH_RUNNER", "opencode2")
+	if c := loadConfig(); c.Runner != "opencode2" {
+		t.Fatalf("RALPH_RUNNER override ignored: %q", c.Runner)
+	}
+}

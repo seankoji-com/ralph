@@ -29,7 +29,7 @@ func loadConfig() Config {
 		Org:         envOr("RALPH_ORG", "seankoji-com"),
 		ReposDir:    envOr("RALPH_REPOS_DIR", filepath.Join(home, "repos")),
 		StateDir:    envOr("RALPH_STATE_DIR", filepath.Join(envOr("XDG_STATE_HOME", filepath.Join(home, ".local", "state")), "ralph")),
-		Runner:      envOr("RALPH_RUNNER", "opencode2"),
+		Runner:      envOr("RALPH_RUNNER", "opencode"),
 		Model:       envOr("RALPH_MODEL", "litellm/deepseek-v4.1-flash"),
 		AssistModel: envOr("RALPH_ASSIST_MODEL", "deepseek-v4.1-flash"),
 	}
@@ -68,7 +68,7 @@ func loadConfig() Config {
 	return c
 }
 
-// opencodeConfigPaths lists the isolated OpenCode2 config, then the main one.
+// opencodeConfigPaths lists an optional isolated OpenCode root's config, then the main one.
 func opencodeConfigPaths() []string {
 	home, _ := os.UserHomeDir()
 	return []string{
