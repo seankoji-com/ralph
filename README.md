@@ -18,7 +18,7 @@ Each loop runs in its own Git worktree, so closing the terminal never strands wo
 
 ## Run it
 
-Requires Go 1.26.0 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and [OpenCode](https://opencode.ai) on your `PATH` as `opencode`. Ralph calls `opencode run --standalone --auto` and `opencode models --standalone`; both were checked against OpenCode 2.0.32. If your OpenCode binary has another name or path, set `RALPH_RUNNER` to it. macOS and Linux are supported; detached workers use Unix process groups.
+Requires Go 1.26.7 or newer, Git, an authenticated GitHub CLI (`gh auth login`), and [OpenCode](https://opencode.ai) on your `PATH` as `opencode`. Ralph calls `opencode run --standalone --auto` and `opencode models --standalone`; both were checked against OpenCode 2.0.32. If your OpenCode binary has another name or path, set `RALPH_RUNNER` to it. macOS and Linux are supported; detached workers use Unix process groups.
 
 ```sh
 go build -o bin/ralph .
